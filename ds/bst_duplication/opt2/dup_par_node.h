@@ -117,6 +117,15 @@ public:
 		{
 			if (n->parent != nullptr && dups.find(n) != dups.end())
 				n->parent->children[n->idx_in_parent_children] = dups.at(n);
+
+			for (auto& ch : n->children)
+			{
+				auto to_update = ch;
+				if (dups.at(ch) != dups.end())
+					to_update = dups.at(ch);
+				if (ch != nullptr)
+					to_update->parent = dups.at(n);
+			}
 		}
 	}
 };

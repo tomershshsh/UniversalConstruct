@@ -1,6 +1,7 @@
 #pragma once
 
 #include "pc_par_node.h"
+#include <atomic>
 
 const unsigned int LEFT = 0;
 const unsigned int RIGHT = 1;
@@ -103,7 +104,7 @@ public:
 		else
 			parent->set_child(RIGHT, new node(key, MAX_CHILDREN), path, dups, new_root);
 
-		root = new_root;
+		std::atomic_exchange(&root, new_root);
 		return true;
 	}
 
@@ -133,7 +134,7 @@ public:
 			found->delete_node(path, dups, new_root);
 		}
 
-		root = new_root;
+		std::atomic_exchange(&root, new_root);
 		return true;
 	}
 
