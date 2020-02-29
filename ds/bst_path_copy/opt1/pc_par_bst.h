@@ -26,8 +26,7 @@ private:
 	node* find(
 		node* start,
 		const skey_t& key,
-		node*& parent,
-		std::vector<node*>& path)
+		node*& parent)
 	{
 		auto curr = start;
 
@@ -36,36 +35,26 @@ private:
 			if (key < curr->get_key())
 			{
 				parent = curr;
-				path.push_back(parent);
 				curr = curr->get_child(LEFT);
 			}
 			else if (key > curr->get_key())
 			{
 				parent = curr;
-				path.push_back(parent);
 				curr = curr->get_child(RIGHT);
 			}
 			else
 			{
 				if (!curr->is_deleted())
 				{
-					path.push_back(curr);
 					return curr;
 				}
 				else
 				{
+					parent = curr;
 					if (curr->get_child(RIGHT))
-					{
-						parent = curr;
-						path.push_back(parent);
 						curr = curr->get_child(RIGHT);
-					}
 					else
-					{
-						parent = curr;
-						path.push_back(parent);
 						curr = curr->get_child(LEFT);
-					}
 				}
 			}
 		}
@@ -83,7 +72,7 @@ public:
 
 	bool insert(const skey_t& key)
 	{
-		std::map<node*, node*> dups; // 
+		node_t<skey_t>::open(root);
 
 		if (root == nullptr)
 		{
@@ -92,55 +81,48 @@ public:
 		}
 
 		node* parent = nullptr;
-		std::vector<node*> path;
-		auto found = find(root, key, parent, path);
+		auto found = find(root, key, parent);
 
 		if (found != nullptr || parent == nullptr)
 			return false;
 
-		node* new_root;
 		if (key < parent->get_key())
-			parent->set_child(LEFT, new node(key, MAX_CHILDREN), path, dups, new_root);
+			parent->set_child(LEFT, new node(key, MAX_CHILDREN));
 		else
-			parent->set_child(RIGHT, new node(key, MAX_CHILDREN), path, dups, new_root);
+			parent->set_child(RIGHT, new node(key, MAX_CHILDREN));
 
-		std::atomic_exchange(&root, new_root);
-		return true;
+		return node_t<skey_t>::close(root);
 	}
 
 	bool remove(const skey_t& key)
 	{
-		std::map<node*, node*> dups; // 
+		node_t<skey_t>::open(root);
 
 		node_t<skey_t>* parent = nullptr;
-		std::vector<node*> path;
-		auto found = find(root, key, parent, path);
+		auto found = find(root, key, parent);
 
 		if (found == nullptr)
 			return false;
 
-		node* new_root;
 		if (found->get_child(LEFT) == nullptr && found->get_child(RIGHT) == nullptr)
 		{
 			if (parent == nullptr)
-				found->delete_node(path, dups, new_root);
+				found->delete_node();
 			else if (parent->get_key() <= found->get_key())
-				parent->set_child(RIGHT, nullptr, path, dups, new_root);
+				parent->set_child(RIGHT, nullptr);
 			else
-				parent->set_child(LEFT, nullptr, path, dups, new_root);
+				parent->set_child(LEFT, nullptr);
 		}
 		else
 		{
-			found->delete_node(path, dups, new_root);
+			found->delete_node();
 		}
 
-		std::atomic_exchange(&root, new_root);
-		return true;
+		return node_t<skey_t>::close(root);
 	}
 
 	bool search(const skey_t& key) {
 		node* parent = nullptr;
-		std::vector<node*> path;
-		return (find(root, key, parent, path) != nullptr);
+		return (find(root, key, parent) != nullptr);
 	}
 };
