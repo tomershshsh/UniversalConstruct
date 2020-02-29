@@ -34,50 +34,40 @@ private:
 	inline void set_dup() { flags |= DUP_MASK; }
 	inline bool is_del() { return (flags & DEL_MASK) == DEL_MASK; }
 	inline void set_del() { flags |= DEL_MASK; }
-
-	inline static unsigned int get_child_idx(node_t<skey_t>* self, node_t<skey_t>* parent)
-	{
-		unsigned int idx = 0;
-		for (auto& ch : parent->children)
-		{
-			if (ch != nullptr && self->key == ch->key)
-				return idx;
-			idx++;
-		}
-
-		return std::numeric_limits<unsigned int>::max();
-	}
 	
 	node_t<skey_t>* write(write_params_t&& params);
 
 public:
 	node_t(const skey_t& key, unsigned int max_num_children);
-
 	node_t(const node_t<skey_t>& node);
 
 	skey_t get_key();
-
 	node_t<skey_t>* get_child(unsigned int child_idx);
-
 	bool is_deleted();
 
 	node_t<skey_t>* set_key(const skey_t& new_key);
-
 	node_t<skey_t>* set_child(unsigned int child_idx, node_t<skey_t>* new_child);
-
 	node_t<skey_t>* delete_node();
 
 	static bool open(node_t<skey_t>*& root);
-
 	static bool close(node_t<skey_t>*& root);
 };
 
 template<typename skey_t>
-thread_local std::unordered_map<node_t<skey_t>*, 
-	std::pair<node_t<skey_t>*, node_t<skey_t>*>> duplications;
+struct duplication_info_t
+{
+	node_t<skey_t>* dup;
+	node_t<skey_t>* orig_parent;
+	unsigned int orig_idx;
+};
 
 template<typename skey_t>
-thread_local std::unordered_map<node_t<skey_t>*, node_t<skey_t>*> node_parent_map;
+thread_local std::unordered_map<node_t<skey_t>*, 
+	duplication_info_t<skey_t>> duplications;
+
+template<typename skey_t>
+thread_local std::unordered_map<node_t<skey_t>*, 
+	std::pair<node_t<skey_t>*, unsigned int>> node_parent_map;
 
 template<typename skey_t>
 thread_local node_t<skey_t>* orig_root;
@@ -98,19 +88,18 @@ bool node_t<skey_t>::open(node_t<skey_t>*& root)
 template<typename skey_t>
 bool node_t<skey_t>::close(node_t<skey_t>*& root)
 {
-	const std::lock_guard<std::mutex> lock(g_mutex);
+	std::lock_guard<std::mutex> lock(g_mutex);
 	for (auto& d : duplications<skey_t>)
 	{
 		auto orig = d.first;
-		auto dup = d.second.first;
-		auto orig_parent = d.second.second;
+		auto dup = d.second.dup;
+		auto orig_parent = d.second.orig_parent;
+		auto orig_idx = d.second.orig_idx;
 
 		if (orig_parent != nullptr)
 		{
-			auto idx = get_child_idx(orig, orig_parent);
-			if (idx != std::numeric_limits<unsigned int>::max() &&
-				orig_parent->children[idx] == orig)
-				orig_parent->children[idx] = dup;
+			if (orig_parent->children[orig_idx] == orig)
+				orig_parent->children[orig_idx] = dup;
 			else
 				return false;
 		}
@@ -131,9 +120,11 @@ node_t<skey_t>* node_t<skey_t>::write(write_params_t&& params)
 	node_t<skey_t>* dup = new node_t<skey_t>(*this);
 	this->set_dup();
 	node_t<skey_t>* parent;
+	unsigned int child_idx = std::numeric_limits<unsigned int>::max();
 	if (node_parent_map<skey_t>.find(this) != node_parent_map<skey_t>.end())
 	{
-		parent = node_parent_map<skey_t>[this];
+		parent = node_parent_map<skey_t>[this].first;
+		child_idx = node_parent_map<skey_t>[this].second;
 	}
 	else
 	{
@@ -159,8 +150,8 @@ node_t<skey_t>* node_t<skey_t>::write(write_params_t&& params)
 
 	if (parent != nullptr && parent->is_dup())
 	{
-		node_t<skey_t>* parent_dup = duplications<skey_t>[parent].first;
-		parent_dup->children[get_child_idx(dup, parent_dup)] = dup;
+		node_t<skey_t>* parent_dup = duplications<skey_t>[parent].dup;
+		parent_dup->children[child_idx] = dup;
 	}
 
 	unsigned int ch_idx = 0;
@@ -168,13 +159,13 @@ node_t<skey_t>* node_t<skey_t>::write(write_params_t&& params)
 	{
 		if (ch != nullptr && ch->is_dup())
 		{
-			node_t<skey_t>* child_dup = duplications<skey_t>[ch].first;
+			node_t<skey_t>* child_dup = duplications<skey_t>[ch].dup;
 			dup->children[ch_idx] = child_dup;
 			ch_idx++;
 		}
 	}
 
-	duplications<skey_t>.insert({ this, std::make_pair(dup, parent) });
+	duplications<skey_t>.insert({ this, {dup, parent, child_idx} });
 	return dup;
 }
 
@@ -205,9 +196,10 @@ node_t<skey_t>* node_t<skey_t>::get_child(unsigned int child_idx)
 		return nullptr;
 
 	node_t<skey_t>* child = children.at(child_idx);
-	node_parent_map<skey_t>.insert({ child, this });
+	if (child != nullptr)
+		node_parent_map<skey_t>.insert({ child, std::make_pair(this, child_idx) });
 
-	return children.at(child_idx);
+	return child;
 }
 
 template<typename skey_t>

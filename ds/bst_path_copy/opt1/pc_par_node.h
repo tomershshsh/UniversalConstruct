@@ -2,9 +2,11 @@
 
 #include <vector>
 #include <unordered_map>
+#include <mutex>
 
 const unsigned char DUP_MASK = 0x01;
 const unsigned char DEL_MASK = 0x02;
+static std::mutex g_mutex;
 
 enum class node_field
 {
@@ -33,19 +35,6 @@ private:
 	inline bool is_del() { return (flags & DEL_MASK) == DEL_MASK; }
 	inline void set_del() { flags |= DEL_MASK; }
 
-	inline unsigned int get_child_idx(node_t<skey_t>* self, node_t<skey_t>* parent)
-	{
-		unsigned int idx = 0;
-		for (auto& ch : parent->children)
-		{
-			if (ch != nullptr && self->key == ch->key)
-				return idx;
-			idx++;
-		}
-
-		return std::numeric_limits<unsigned int>::max();
-	}
-
 	node_t<skey_t>* path_copy();
 	node_t<skey_t>* write(write_params_t&& params);
 	
@@ -69,7 +58,8 @@ template<typename skey_t>
 thread_local std::unordered_map<node_t<skey_t>*, node_t<skey_t>*> duplications;
 
 template<typename skey_t>
-thread_local std::unordered_map<node_t<skey_t>*, node_t<skey_t>*> node_parent_map;
+thread_local std::unordered_map<node_t<skey_t>*, 
+	std::pair<node_t<skey_t>*, unsigned int>> node_parent_map;
 
 template<typename skey_t>
 thread_local node_t<skey_t>* orig_root;
@@ -89,6 +79,7 @@ bool node_t<skey_t>::open(node_t<skey_t>*& root)
 template<typename skey_t>
 bool node_t<skey_t>::close(node_t<skey_t>*& root)
 {
+	std::lock_guard<std::mutex> lock(g_mutex);
 	if (root == orig_root<skey_t>)
 	{
 		root = new_root<skey_t>;
@@ -111,11 +102,12 @@ node_t<skey_t>* node_t<skey_t>::path_copy()
 
 	bool reached_root = false;
 	while (!(reached_root = (node_parent_map<skey_t>.find(current) == node_parent_map<skey_t>.end())) &&
-		!node_parent_map<skey_t>[current]->is_dup())
+		!node_parent_map<skey_t>[current].first->is_dup())
 	{
-		parent = node_parent_map<skey_t>[current];
+		parent = node_parent_map<skey_t>[current].first;
+		auto child_idx = node_parent_map<skey_t>[current].second;
 		parent_dup = new node_t<skey_t>(*parent);
-		parent_dup->children[get_child_idx(current, parent)] = current_dup;
+		parent_dup->children[child_idx] = current_dup;
 
 		duplications<skey_t>.insert({ parent, parent_dup });
 		parent->set_dup();
@@ -130,8 +122,10 @@ node_t<skey_t>* node_t<skey_t>::path_copy()
 	}
 	else // reached a duplicated parent
 	{
-		auto to_update = duplications<skey_t>[node_parent_map<skey_t>[current]];
-		to_update->children[get_child_idx(current, to_update)] = current_dup;
+		auto parent = node_parent_map<skey_t>[current].first;
+		auto child_idx = node_parent_map<skey_t>[current].second;
+		auto to_update = duplications<skey_t>[parent];
+		to_update->children[child_idx] = current_dup;
 	}
 
 	return duplication;
@@ -188,9 +182,10 @@ node_t<skey_t>* node_t<skey_t>::get_child(unsigned int child_idx)
 		return nullptr;
 
 	node_t<skey_t>* child = children.at(child_idx);
-	node_parent_map<skey_t>.insert({ child, this });
+	if (child != nullptr)
+		node_parent_map<skey_t>.insert({ child, std::make_pair(this, child_idx) });
 
-	return children.at(child_idx);
+	return child;
 }
 
 template<typename skey_t>
