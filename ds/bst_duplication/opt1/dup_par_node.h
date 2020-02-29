@@ -157,8 +157,7 @@ node_t<skey_t>* node_t<skey_t>::write(write_params_t&& params)
 		break;
 	}
 
-	if (parent != nullptr &&
-		duplications<skey_t>.find(parent) != duplications<skey_t>.end())
+	if (parent != nullptr && parent->is_dup())
 	{
 		node_t<skey_t>* parent_dup = duplications<skey_t>[parent].first;
 		parent_dup->children[get_child_idx(dup, parent_dup)] = dup;
@@ -167,10 +166,9 @@ node_t<skey_t>* node_t<skey_t>::write(write_params_t&& params)
 	unsigned int ch_idx = 0;
 	for (auto& ch : dup->children)
 	{
-		if (ch != nullptr && 
-			duplications<skey_t>.find(ch) != duplications<skey_t>.end())
+		if (ch != nullptr && ch->is_dup())
 		{
-			auto child_dup = duplications<skey_t>[ch].first;
+			node_t<skey_t>* child_dup = duplications<skey_t>[ch].first;
 			dup->children[ch_idx] = child_dup;
 			ch_idx++;
 		}

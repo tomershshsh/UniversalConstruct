@@ -125,7 +125,14 @@ node_t<skey_t>* node_t<skey_t>::path_copy()
 	}
 
 	if (reached_root)
+	{
 		new_root<skey_t> = current_dup;
+	}
+	else // reached a duplicated parent
+	{
+		auto to_update = duplications<skey_t>[node_parent_map<skey_t>[current]];
+		to_update->children[get_child_idx(current, to_update)] = current_dup;
+	}
 
 	return duplication;
 }
