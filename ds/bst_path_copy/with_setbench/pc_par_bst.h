@@ -72,8 +72,6 @@ public:
 
 	bool insert(const skey_t& key)
 	{
-		node_t<skey_t>::open(root);
-
 		if (root == nullptr)
 		{
 			root = new node(key, MAX_CHILDREN);
@@ -91,13 +89,24 @@ public:
 		else
 			parent->set_child(RIGHT, new node(key, MAX_CHILDREN));
 
-		return node_t<skey_t>::close(root);
+		return true;
+	}
+
+	bool insert_wrapper(const skey_t& key)
+	{
+		bool insertion_res;
+
+		do
+		{
+			node_t<skey_t>::open(root);
+			insertion_res = insert(key);
+		} while (!node_t<skey_t>::close(root));
+
+		return insertion_res;
 	}
 
 	bool remove(const skey_t& key)
 	{
-		node_t<skey_t>::open(root);
-
 		node_t<skey_t>* parent = nullptr;
 		auto found = find(root, key, parent);
 
@@ -118,7 +127,20 @@ public:
 			found->delete_node();
 		}
 
-		return node_t<skey_t>::close(root);
+		return true;
+	}
+
+	bool remove_wrapper(const skey_t& key)
+	{
+		bool removal_res;
+
+		do
+		{
+			node_t<skey_t>::open(root);
+			removal_res = remove(key);
+		} while (!node_t<skey_t>::close(root));
+
+		return removal_res;
 	}
 
 	bool search(const skey_t& key) {

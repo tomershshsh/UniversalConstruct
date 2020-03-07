@@ -4,7 +4,6 @@
 #include <unordered_map>
 #include <mutex>
 
-const unsigned char DUP_MASK = 0x01;
 const unsigned char DEL_MASK = 0x02;
 static std::mutex g_mutex;
 
@@ -15,13 +14,6 @@ enum class node_field
 	DELETE
 };
 
-struct write_params_t
-{
-	node_field field_indicator;
-	unsigned int specifier;
-	void* replacement;
-};
-
 template <typename skey_t>
 class node_t
 {
@@ -30,13 +22,10 @@ private:
 	unsigned char flags;
 	std::vector<node_t<skey_t>*> children;
 
-	inline bool is_dup() { return (flags & DUP_MASK) == DUP_MASK; }
-	inline void set_dup() { flags |= DUP_MASK; }
 	inline bool is_del() { return (flags & DEL_MASK) == DEL_MASK; }
 	inline void set_del() { flags |= DEL_MASK; }
 
 	node_t<skey_t>* path_copy();
-	node_t<skey_t>* write(write_params_t&& params);
 	
 public:
 	node_t(const skey_t& key, unsigned int max_num_children);
@@ -61,6 +50,9 @@ template<typename skey_t>
 thread_local std::unordered_map<node_t<skey_t>*, 
 	std::pair<node_t<skey_t>*, unsigned int>> node_parent_map;
 
+thread_local bool in_writing_function = false;
+thread_local bool pc_happened = false;
+
 template<typename skey_t>
 thread_local node_t<skey_t>* orig_root;
 
@@ -73,20 +65,30 @@ bool node_t<skey_t>::open(node_t<skey_t>*& root)
 	duplications<skey_t>.clear();
 	node_parent_map<skey_t>.clear();
 	orig_root<skey_t> = root;
+	in_writing_function = true;
+	pc_happened = false;
 	return true;
 }
 
 template<typename skey_t>
 bool node_t<skey_t>::close(node_t<skey_t>*& root)
-{
-	std::lock_guard<std::mutex> lock(g_mutex);
-	if (root == orig_root<skey_t>)
+{	
+	if (pc_happened)
 	{
-		root = new_root<skey_t>;
+		std::lock_guard<std::mutex> lock(g_mutex);
+		in_writing_function = false;
+		if (root == orig_root<skey_t>)
+		{
+			root = new_root<skey_t>;
+			return true;
+		}
+
+		return false;
+	}
+	else
+	{
 		return true;
 	}
-
-	return false;
 }
 
 template<typename skey_t>
@@ -102,7 +104,7 @@ node_t<skey_t>* node_t<skey_t>::path_copy()
 
 	bool reached_root = false;
 	while (!(reached_root = (node_parent_map<skey_t>.find(current) == node_parent_map<skey_t>.end())) &&
-		!node_parent_map<skey_t>[current].first->is_dup())
+		duplications<skey_t>.find(node_parent_map<skey_t>[current].first) == duplications<skey_t>.end())
 	{
 		parent = node_parent_map<skey_t>[current].first;
 		auto child_idx = node_parent_map<skey_t>[current].second;
@@ -110,7 +112,6 @@ node_t<skey_t>* node_t<skey_t>::path_copy()
 		parent_dup->children[child_idx] = current_dup;
 
 		duplications<skey_t>.insert({ parent, parent_dup });
-		parent->set_dup();
 
 		current = parent;
 		current_dup = parent_dup;
@@ -128,31 +129,8 @@ node_t<skey_t>* node_t<skey_t>::path_copy()
 		to_update->children[child_idx] = current_dup;
 	}
 
+	pc_happened = true;
 	return duplication;
-}
-
-template<typename skey_t>
-node_t<skey_t>* node_t<skey_t>::write(write_params_t&& params)
-{
-	auto dup = path_copy();
-
-	switch (params.field_indicator)
-	{
-	case node_field::KEY:
-		dup->key = *(skey_t*)params.replacement;
-		break;
-	case node_field::CHILD:
-		if (params.specifier < dup->children.size())
-			dup->children[params.specifier] = (node_t<skey_t>*)params.replacement;
-		break;
-	case node_field::DELETE:
-		dup->set_del();
-		break;
-	default:
-		break;
-	}
-
-	return dup;
 }
 
 template<typename skey_t>
@@ -182,7 +160,7 @@ node_t<skey_t>* node_t<skey_t>::get_child(unsigned int child_idx)
 		return nullptr;
 
 	node_t<skey_t>* child = children.at(child_idx);
-	if (child != nullptr)
+	if (in_writing_function && child != nullptr)
 		node_parent_map<skey_t>.insert({ child, std::make_pair(this, child_idx) });
 
 	return child;
@@ -197,17 +175,23 @@ bool node_t<skey_t>::is_deleted()
 template<typename skey_t>
 node_t<skey_t>* node_t<skey_t>::set_key(const skey_t& new_key)
 {
-	return write({ node_field::KEY, 0, (void*)& new_key });
+	auto dup = path_copy();
+	dup->key = new_key;
+	return dup;
 }
 
 template<typename skey_t>
 node_t<skey_t>* node_t<skey_t>::set_child(unsigned int child_idx, node_t<skey_t>* new_child)
 {
-	return write({ node_field::CHILD, child_idx, (void*)new_child });
+	auto dup = path_copy();
+	dup->children[child_idx] = new_child;
+	return dup;
 }
 
 template<typename skey_t>
 node_t<skey_t>* node_t<skey_t>::delete_node()
 {
-	return write({ node_field::DELETE, 0, nullptr });
+	auto dup = path_copy();
+	dup->set_del();
+	return dup;
 }

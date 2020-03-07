@@ -1,6 +1,6 @@
 #pragma once
 
-#include "pc_par_node.h"
+#include "dup_par_node.h"
 
 const unsigned int LEFT = 0;
 const unsigned int RIGHT = 1;
@@ -9,11 +9,9 @@ const unsigned int MAX_CHILDREN = 2;
 template <typename skey_t>
 class BST {
 private:
-	using node = node_t<skey_t>;
+	node_t<skey_t>* root;
 
-	node* root;
-
-	void make_empty(node* t) {
+	void make_empty(node_t<skey_t>* t) {
 		if (t == nullptr)
 			return;
 
@@ -22,10 +20,10 @@ private:
 		delete t;
 	}
 
-	node* find(
-		node* start,
+	node_t<skey_t>* find(
+		node_t<skey_t>* start,
 		const skey_t& key,
-		node*& parent)
+		node_t<skey_t>*& parent)
 	{
 		auto curr = start;
 
@@ -70,61 +68,79 @@ public:
 
 	bool insert(const skey_t& key)
 	{
-		std::map<node*, node*> dups; // 
-
 		if (root == nullptr)
 		{
-			root = new node(key, MAX_CHILDREN);
+			root = new node_t<skey_t>(key, MAX_CHILDREN);
 			return true;
 		}
 
-		node* parent = nullptr;
+		node_t<skey_t>* parent = nullptr;
 		auto found = find(root, key, parent);
 
 		if (found != nullptr || parent == nullptr)
 			return false;
 
-		node* res;
 		if (key < parent->get_key())
-			res = parent->set_child(LEFT, new node(key, MAX_CHILDREN), dups);
+			parent->set_child(LEFT, new node_t<skey_t>(key, MAX_CHILDREN));
 		else
-			res = parent->set_child(RIGHT, new node(key, MAX_CHILDREN), dups);
+			parent->set_child(RIGHT, new node_t<skey_t>(key, MAX_CHILDREN));
 
-		root = res->get_root();
 		return true;
+	}
+
+	bool insert_wrapper(const skey_t& key)
+	{
+		bool insertion_res;
+
+		do
+		{
+			node_t<skey_t>::open(root);
+			insertion_res = insert(key);
+		} while (!node_t<skey_t>::close(root));
+
+		return insertion_res;
 	}
 
 	bool remove(const skey_t& key)
 	{
-		std::map<node*, node*> dups; // 
-
 		node_t<skey_t>* parent = nullptr;
 		auto found = find(root, key, parent);
 
 		if (found == nullptr)
 			return false;
 
-		node* res;
 		if (found->get_child(LEFT) == nullptr && found->get_child(RIGHT) == nullptr)
 		{
 			if (parent == nullptr)
-				res = found->delete_node(dups);
+				found->delete_node();
 			else if (parent->get_key() <= found->get_key())
-				res = parent->set_child(RIGHT, nullptr, dups);
+				parent->set_child(RIGHT, nullptr);
 			else
-				res = parent->set_child(LEFT, nullptr, dups);
+				parent->set_child(LEFT, nullptr);
 		}
 		else
 		{
-			res = found->delete_node(dups);
+			found->delete_node();
 		}
 
-		root = res->get_root();
 		return true;
 	}
 
+	bool remove_wrapper(const skey_t& key)
+	{
+		bool removal_res;
+
+		do
+		{
+			node_t<skey_t>::open(root);
+			removal_res = remove(key);
+		} while (!node_t<skey_t>::close(root));
+
+		return removal_res;
+	}
+
 	bool search(const skey_t& key) {
-		node* parent = nullptr;
+		node_t<skey_t>* parent = nullptr;
 		return (find(root, key, parent) != nullptr);
 	}
 };
