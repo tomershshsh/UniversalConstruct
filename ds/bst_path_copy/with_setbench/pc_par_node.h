@@ -3,83 +3,95 @@
 #include <vector>
 #include <unordered_map>
 #include <mutex>
+#include "record_manager.h"
+
+#define Node node_t<skey_t, sval_t>
 
 const unsigned char DEL_MASK = 0x02;
 static std::mutex g_mutex;
 
-enum class node_field
-{
-	KEY,
-	CHILD,
-	DELETE
-};
-
-template <typename skey_t>
+template <typename skey_t, typename sval_t>
 class node_t
 {
-private:
+public:
+// private:
 	skey_t key;
+	sval_t value;
 	unsigned char flags;
-	std::vector<node_t<skey_t>*> children;
+	std::vector<Node*> children;
 
 	inline bool is_del() { return (flags & DEL_MASK) == DEL_MASK; }
 	inline void set_del() { flags |= DEL_MASK; }
 
-	node_t<skey_t>* path_copy();
+	// Node* path_copy(const int& tid);
 	
-public:
-	node_t(const skey_t& key, unsigned int max_num_children);
-	node_t(const node_t<skey_t>& node);
+// public:
+	// node_t(const skey_t& key, const sval_t& value, unsigned int max_num_children);
+	// node_t(const Node& node);
 
 	skey_t get_key();
-	node_t<skey_t>* get_child(unsigned int child_idx);
+	sval_t get_value();
+	Node* get_child(unsigned int child_idx);
 	bool is_deleted();
 	
-	node_t<skey_t>* set_key(const skey_t& new_key);
-	node_t<skey_t>* set_child(unsigned int child_idx, node_t<skey_t>* new_child);
-	node_t<skey_t>* delete_node();
+	Node* set_key(const skey_t& new_key);
+	Node* set_child(unsigned int child_idx, Node* new_child);
+	Node* delete_node();
 
-	static bool open(node_t<skey_t>*& root);
-	static bool close(node_t<skey_t>*& root);
+	static bool open(Node*& root);
+	static bool close(Node*& root);
 };
 
-template<typename skey_t>
-thread_local std::unordered_map<node_t<skey_t>*, node_t<skey_t>*> duplications;
+template <typename skey_t, typename sval_t>
+thread_local std::unordered_map<Node*, Node*>* duplications = nullptr;
+#define duplications	duplications<skey_t, sval_t>
 
-template<typename skey_t>
-thread_local std::unordered_map<node_t<skey_t>*, 
-	std::pair<node_t<skey_t>*, unsigned int>> node_parent_map;
+template <typename skey_t, typename sval_t>
+thread_local std::unordered_map<Node*, 
+	std::pair<Node*, unsigned int>>* node_parent_map = nullptr;
+#define node_parent_map	node_parent_map<skey_t, sval_t>
 
 thread_local bool in_writing_function = false;
 thread_local bool pc_happened = false;
 
-template<typename skey_t>
-thread_local node_t<skey_t>* orig_root;
+template <typename skey_t, typename sval_t>
+thread_local Node* orig_root;
+#define orig_root	orig_root<skey_t, sval_t>
 
-template<typename skey_t>
-thread_local node_t<skey_t>* new_root;
+template <typename skey_t, typename sval_t>
+thread_local Node* new_root;
+#define	new_root	new_root<skey_t, sval_t>
 
-template<typename skey_t>
-bool node_t<skey_t>::open(node_t<skey_t>*& root)
+template <typename skey_t, typename sval_t>
+bool Node::open(Node*& root)
 {
-	duplications<skey_t>.clear();
-	node_parent_map<skey_t>.clear();
-	orig_root<skey_t> = root;
+	if (node_parent_map)
+		node_parent_map->clear();
+	else
+		node_parent_map = new std::unordered_map<Node*, std::pair<Node*, unsigned int>>();
+
+	if (duplications)
+		duplications->clear();
+	else
+		duplications = new std::unordered_map<Node*, Node*>();
+		
+	orig_root = root;
 	in_writing_function = true;
 	pc_happened = false;
 	return true;
 }
 
-template<typename skey_t>
-bool node_t<skey_t>::close(node_t<skey_t>*& root)
+template <typename skey_t, typename sval_t>
+bool Node::close(Node*& root)
 {	
+	in_writing_function = false;
+
 	if (pc_happened)
 	{
 		std::lock_guard<std::mutex> lock(g_mutex);
-		in_writing_function = false;
-		if (root == orig_root<skey_t>)
+		if (root == orig_root)
 		{
-			root = new_root<skey_t>;
+			root = new_root;
 			return true;
 		}
 
@@ -91,107 +103,116 @@ bool node_t<skey_t>::close(node_t<skey_t>*& root)
 	}
 }
 
-template<typename skey_t>
-node_t<skey_t>* node_t<skey_t>::path_copy()
-{
-	node_t<skey_t>* duplication = new node_t<skey_t>(*this);
-	duplications<skey_t>.insert({ this, duplication });
+// template <typename skey_t, typename sval_t, class RecMgr>
+// Node* Node::path_copy(const int& tid)
+// {
+// 	// node_t<skey_t>* duplication = new node_t<skey_t>(*this);
+// 	Node* duplication = (Node*)recmgr<RecMgr>->template allocate<Node>(tid, *this);
+// 	duplications.insert({ this, duplication });
+// 	recmgr<RecMgr>->retire(tid, this);
+//
+// 	Node* current = this;
+// 	Node* current_dup = duplication;
+// 	Node* parent;
+// 	Node* parent_dup;
+//
+// 	bool reached_root = false;
+// 	while (!(reached_root = (node_parent_map.find(current) == node_parent_map.end())) &&
+// 		duplications.find(node_parent_map[current].first) == duplications.end())
+// 	{
+// 		parent = node_parent_map[current].first;
+// 		auto child_idx = node_parent_map[current].second;
+// 		// parent_dup = new node_t<skey_t>(*parent);
+// 		parent_dup = (Node*)recmgr<RecMgr>->template allocate<Node>(tid, *parent);
+// 		parent_dup->children[child_idx] = current_dup;
+//
+// 		duplications.insert({ parent, parent_dup });
+// 		recmgr<RecMgr>->retire(tid, parent);
+//
+// 		current = parent;
+// 		current_dup = parent_dup;
+// 	}
+//
+// 	if (reached_root)
+// 	{
+// 		new_root = current_dup;
+// 	}
+// 	else // reached a duplicated parent
+// 	{
+// 		auto parent = node_parent_map[current].first;
+// 		auto child_idx = node_parent_map[current].second;
+// 		auto to_update = duplications[parent];
+// 		to_update->children[child_idx] = current_dup;
+// 	}
+//
+// 	pc_happened = true;
+// 	return duplication;
+// }
 
-	node_t<skey_t>* current = this;
-	node_t<skey_t>* current_dup = duplication;
-	node_t<skey_t>* parent;
-	node_t<skey_t>* parent_dup;
+// template <typename skey_t, typename sval_t>
+// Node::node_t(const skey_t& key, const sval_t& value, unsigned int max_num_children) :
+// 	key(key),
+// 	value(value),
+// 	children(max_num_children, nullptr),
+// 	flags(0)
+// {}
 
-	bool reached_root = false;
-	while (!(reached_root = (node_parent_map<skey_t>.find(current) == node_parent_map<skey_t>.end())) &&
-		duplications<skey_t>.find(node_parent_map<skey_t>[current].first) == duplications<skey_t>.end())
-	{
-		parent = node_parent_map<skey_t>[current].first;
-		auto child_idx = node_parent_map<skey_t>[current].second;
-		parent_dup = new node_t<skey_t>(*parent);
-		parent_dup->children[child_idx] = current_dup;
+// template <typename skey_t, typename sval_t>
+// Node::node_t(const Node& node) :
+// 	key(node.key),
+// 	value(node.value),
+// 	children(node.children),
+// 	flags(node.flags)
+// {}
 
-		duplications<skey_t>.insert({ parent, parent_dup });
-
-		current = parent;
-		current_dup = parent_dup;
-	}
-
-	if (reached_root)
-	{
-		new_root<skey_t> = current_dup;
-	}
-	else // reached a duplicated parent
-	{
-		auto parent = node_parent_map<skey_t>[current].first;
-		auto child_idx = node_parent_map<skey_t>[current].second;
-		auto to_update = duplications<skey_t>[parent];
-		to_update->children[child_idx] = current_dup;
-	}
-
-	pc_happened = true;
-	return duplication;
-}
-
-template<typename skey_t>
-node_t<skey_t>::node_t(const skey_t& key, unsigned int max_num_children) :
-	key(key),
-	children(max_num_children, nullptr),
-	flags(0)
-{}
-
-template<typename skey_t>
-node_t<skey_t>::node_t(const node_t<skey_t>& node) :
-	key(node.key),
-	children(node.children),
-	flags(node.flags)
-{}
-
-template<typename skey_t>
-skey_t node_t<skey_t>::get_key() 
+template <typename skey_t, typename sval_t>
+skey_t Node::get_key() 
 { 
 	return key; 
 }
 
-template<typename skey_t>
-node_t<skey_t>* node_t<skey_t>::get_child(unsigned int child_idx)
+template <typename skey_t, typename sval_t>
+sval_t Node::get_value()
+{
+	return value;
+}
+
+template <typename skey_t, typename sval_t>
+Node* Node::get_child(unsigned int child_idx)
 {
 	if (child_idx >= children.size())
 		return nullptr;
 
-	node_t<skey_t>* child = children.at(child_idx);
+	Node* child = children.at(child_idx);
 	if (in_writing_function && child != nullptr)
-		node_parent_map<skey_t>.insert({ child, std::make_pair(this, child_idx) });
+		node_parent_map->insert({ child, std::make_pair(this, child_idx) });
 
 	return child;
 }
 
-template<typename skey_t>
-bool node_t<skey_t>::is_deleted() 
+template <typename skey_t, typename sval_t>
+bool Node::is_deleted() 
 { 
 	return is_del(); 
 }
 
-template<typename skey_t>
-node_t<skey_t>* node_t<skey_t>::set_key(const skey_t& new_key)
+template <typename skey_t, typename sval_t>
+Node* Node::set_key(const skey_t& new_key)
 {
-	auto dup = path_copy();
-	dup->key = new_key;
-	return dup;
+	this->key = new_key;
+	return this;
 }
 
-template<typename skey_t>
-node_t<skey_t>* node_t<skey_t>::set_child(unsigned int child_idx, node_t<skey_t>* new_child)
+template <typename skey_t, typename sval_t>
+Node* Node::set_child(unsigned int child_idx, Node* new_child)
 {
-	auto dup = path_copy();
-	dup->children[child_idx] = new_child;
-	return dup;
+	this->children[child_idx] = new_child;
+	return this;
 }
 
-template<typename skey_t>
-node_t<skey_t>* node_t<skey_t>::delete_node()
+template <typename skey_t, typename sval_t>
+Node* Node::delete_node()
 {
-	auto dup = path_copy();
-	dup->set_del();
-	return dup;
+	this->set_del();
+	return this;
 }

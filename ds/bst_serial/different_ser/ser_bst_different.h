@@ -1,9 +1,6 @@
 #pragma once
 
-#include "pc_par_node.h"
-#include <atomic>
-#include <iostream>
-#include <string>
+#include "ser_node_different.h"
 
 const unsigned int LEFT = 0;
 const unsigned int RIGHT = 1;
@@ -30,8 +27,6 @@ private:
 	Node* create_node(const int& tid, const skey_t& key, const sval_t& value, unsigned int max_num_children);
 
 	Node* create_node(const int& tid, const Node& node);
-
-	Node* path_copy(const int& tid, Node* start);
 
 public:
 	BST(
@@ -64,10 +59,6 @@ public:
 	sval_t search_wrapper(const int tid, const skey_t& key);
 };
 
-template <typename skey_t, typename sval_t>
-thread_local Node* tl_root;
-#define tl_root	tl_root<skey_t, sval_t>
-
 template <typename skey_t, typename sval_t, class RecMgr>
 void bst::make_empty(Node* t) {
 	if (t == nullptr)
@@ -79,9 +70,7 @@ void bst::make_empty(Node* t) {
 }
 
 template <typename skey_t, typename sval_t, class RecMgr>
-Node* bst::find(
-	const skey_t& key,
-	Node*& parent)
+Node* bst::find(const skey_t& key, Node*& parent)
 {
 	auto curr = root;
 
@@ -92,38 +81,6 @@ Node* bst::find(
 	}
 
 	return curr;
-
-	// while (curr != nullptr)
-	// {
-	// 	auto curr_key = curr->get_key();
-	// 	if (key < curr_key)
-	// 	{
-	// 		parent = curr;
-	// 		curr = curr->get_child(LEFT);
-	// 	}
-	// 	else if (key > curr_key)
-	// 	{
-	// 		parent = curr;
-	// 		curr = curr->get_child(RIGHT);
-	// 	}
-	// 	else
-	// 	{
-	// 		if (!curr->is_deleted())
-	// 		{
-	// 			return curr;
-	// 		}
-	// 		else
-	// 		{
-	// 			parent = curr;
-	// 			if (curr->get_child(RIGHT))
-	// 				curr = curr->get_child(RIGHT);
-	// 			else
-	// 				curr = curr->get_child(LEFT);
-	// 		}
-	// 	}
-	// }
-
-	// return nullptr;
 }
 
 template <typename skey_t, typename sval_t, class RecMgr>
@@ -132,7 +89,9 @@ Node* bst::create_node(const int& tid, const skey_t& key, const sval_t& value, u
 	Node* result = (Node*)recmgr->template allocate<Node>(tid);
 	result->key = key;
 	result->value = value;
-	result->children.resize(max_num_children, nullptr);
+	// result->children.resize(max_num_children, nullptr);
+	result->left = nullptr;
+	result->right = nullptr;
 	result->flags = 0;
 	return result;
 }
@@ -143,50 +102,11 @@ Node* bst::create_node(const int& tid, const Node& node)
 	Node* result = (Node*)recmgr->template allocate<Node>(tid);
 	result->key = node.key;
 	result->value = node.value;
-	result->children = node.children;
+	// result->children = node.children;
+	result->left = node.left;
+	result->right = node.right;
 	result->flags = node.flags;
 	return result;
-}
-
-template <typename skey_t, typename sval_t, class RecMgr>
-Node* bst::path_copy(const int& tid, Node* start)
-{
-	Node* duplication = create_node(tid, *start);
-	duplications->insert({ start, duplication });
-
-	Node* current = start;
-	Node* current_dup = duplication;
-	Node* parent;
-	Node* parent_dup;
-
-	bool reached_root = false;
-	while (!(reached_root = (node_parent_map->find(current) == node_parent_map->end())) &&
-		duplications->find(node_parent_map->at(current).first) == duplications->end())
-	{
-		parent = node_parent_map->at(current).first;
-		auto child_idx = node_parent_map->at(current).second;
-		parent_dup = create_node(tid, *parent);
-		parent_dup->children[child_idx] = current_dup;
-		duplications->insert({ parent, parent_dup });
-
-		current = parent;
-		current_dup = parent_dup;
-	}
-
-	if (reached_root)
-	{
-		new_root = current_dup;
-	}
-	else // reached a duplicated parent
-	{
-		auto parent = node_parent_map->at(current).first;
-		auto child_idx = node_parent_map->at(current).second;
-		auto to_update = duplications->at(parent);
-		to_update->children[child_idx] = current_dup;
-	}
-
-	pc_happened = true;
-	return duplication;
 }
 
 template <typename skey_t, typename sval_t, class RecMgr>
@@ -260,13 +180,11 @@ sval_t bst::insert(const int tid, const skey_t& key, const sval_t& value)
 
 	if (key < parent->get_key())
 	{
-		auto parent_dup = path_copy(tid, parent);
-		parent_dup->set_child(LEFT, create_node(tid, key, value, MAX_CHILDREN));
+		parent->set_child(LEFT, create_node(tid, key, value, MAX_CHILDREN));
 	}
 	else
 	{
-		auto parent_dup = path_copy(tid, parent);
-		parent_dup->set_child(RIGHT, create_node(tid, key, value, MAX_CHILDREN));
+		parent->set_child(RIGHT, create_node(tid, key, value, MAX_CHILDREN));
 	}
 
 	return NO_VALUE;
@@ -284,18 +202,7 @@ sval_t bst::insert_wrapper(const int tid, const skey_t& key, const sval_t& value
 		insertion_res = insert(tid, key, value);
 		if (Node::close(root))
 		{
-			for (auto& d : *duplications)
-			{
-				recmgr->retire(tid, d.first);
-			}
 			return insertion_res;
-		}
-		else
-		{
-			for (auto& d : *duplications)
-			{
-				recmgr->deallocate(tid, d.second);
-			}
 		}
 	}
 
@@ -312,27 +219,22 @@ sval_t bst::remove(const int tid, const skey_t& key)
 		return NO_VALUE;
 
 	sval_t res = found->get_value();
-	if (found->children[LEFT] == nullptr && found->children[RIGHT] == nullptr)
+	if (found->get_child(LEFT) == nullptr && found->get_child(RIGHT) == nullptr)
 	{
 		if (parent == nullptr)
-		{
 			found->delete_node();
-		}
 		else if (parent->get_key() <= found->get_key())
 		{
-			auto parent_dup = path_copy(tid, parent);
-			parent_dup->set_child(RIGHT, nullptr);
+			parent->set_child(RIGHT, nullptr);
 		}
 		else
 		{
-			auto parent_dup = path_copy(tid, parent);
-			parent_dup->set_child(LEFT, nullptr);
+			parent->set_child(LEFT, nullptr);
 		}
 	}
 	else
 	{
-		auto found_dup = path_copy(tid, found);
-		found_dup->delete_node();
+		found->delete_node();
 	}
 
 	return res;
@@ -341,17 +243,18 @@ sval_t bst::remove(const int tid, const skey_t& key)
 template <typename skey_t, typename sval_t, class RecMgr>
 sval_t bst::remove_wrapper(const int tid, const skey_t& key)
 {
-	auto guard = recmgr->getGuard(tid);
 	sval_t removal_res;
 
-	do
+	while (1)
 	{
+		auto guard = recmgr->getGuard(tid);
 		Node::open(root);
 		removal_res = remove(tid, key);
-	} while (!Node::close(root));
-
-	for (auto& d : *duplications)
-		recmgr->retire(tid, d.first);
+		if (Node::close(root))
+		{
+			return removal_res;
+		}
+	}
 
 	return removal_res;
 }
@@ -359,10 +262,16 @@ sval_t bst::remove_wrapper(const int tid, const skey_t& key)
 template <typename skey_t, typename sval_t, class RecMgr>
 sval_t bst::search(const int tid, const skey_t& key) {
 	auto guard = recmgr->getGuard(tid, true);
-	Node* parent = nullptr;
-	auto found = find(key, parent);
-	if (found != nullptr)
-		return found->get_value();
+	auto curr = root;
+
+	while (curr != nullptr && curr->key != key)
+	{
+		// curr = (key < curr->key) ? curr->children[LEFT] : curr->children[RIGHT];
+		curr = (key < curr->key) ? curr->left : curr->right;
+	}
+
+	if (curr != nullptr)
+		return curr->value;
 	else
 		return NO_VALUE;
 }
