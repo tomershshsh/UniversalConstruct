@@ -74,12 +74,12 @@ Node* bst::find(const skey_t& key, Node*& parent)
 {
 	auto curr = root;
 
-	while (curr != nullptr && curr->key != key)
+	while (curr != nullptr && (curr->key != key || curr->is_del()))
 	{
 		parent = curr;
 		curr = (key < curr->key) ? curr->get_child(LEFT) : curr->get_child(RIGHT);
 	}
-
+	
 	return curr;
 }
 
@@ -260,7 +260,7 @@ sval_t bst::search(const int tid, const skey_t& key) {
 	auto guard = recmgr->getGuard(tid, true);
 	auto curr = root;
 
-	while (curr != nullptr && curr->key != key)
+	while (curr != nullptr && (curr->key != key || curr->is_del()))
 	{
 		curr = (key < curr->key) ? curr->children[LEFT] : curr->children[RIGHT];
 	}

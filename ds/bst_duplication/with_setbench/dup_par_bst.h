@@ -81,7 +81,7 @@ Node* bst::find(const skey_t& key, Node*& parent)
 {
 	auto curr = root;
 
-	while (curr != nullptr && curr->key != key)
+	while (curr != nullptr && (curr->key != key || curr->is_del()))
 	{
 		parent = curr;
 		curr = (key < curr->key) ? curr->get_child(LEFT) : curr->get_child(RIGHT);
@@ -125,17 +125,6 @@ Node* bst::dup_epilogue(const int& tid, Node* orig, Node* dup)
 {
 	Node* parent = nullptr;
 	unsigned int child_idx = MAX_UINT;	
-	// if (orig != orig_root)//if (node_parent_map->find(orig) != node_parent_map->end())
-	// {
-	// 	auto pair = node_parent_map->at(orig);
-	// 	parent = pair.first;
-	// 	child_idx = pair.second;
-	// }
-	// else
-	// {
-	// 	new_root = dup;
-	// 	parent = nullptr;
-	// }
 
 	if (orig != orig_root)
 	{
@@ -162,41 +151,22 @@ Node* bst::dup_epilogue(const int& tid, Node* orig, Node* dup)
 FOUND:
 	for (auto& d : *duplications)
 	{
-		if (parent != nullptr && d.first->key == dup->key)
+		if (parent != nullptr && d.orig->key == dup->key)
 		{
-			d.second.dup->children[child_idx] = dup;
+			d.dup->children[child_idx] = dup;
 			continue;
 		}
 
 		unsigned int ch_idx = 0;
 		for (auto& ch : dup->children)
 		{
-			if (ch != nullptr && d.first->key == ch->key)
-				dup->children[ch_idx] = d.second.dup;
+			if (ch != nullptr && d.orig->key == ch->key)
+				dup->children[ch_idx] = d.dup;
 			ch_idx++;
 		}
 	}
 
-	// if (parent != nullptr && 
-	// 	duplications->find(parent) != duplications->end())
-	// {
-	// 	Node* parent_dup = duplications->at(parent).dup;
-	// 	parent_dup->children[child_idx] = dup;
-	// }
-
-	// unsigned int ch_idx = 0;
-	// for (auto& ch : dup->children)
-	// {
-	// 	if (ch != nullptr && 
-	// 		duplications->find(ch) != duplications->end())
-	// 	{
-	// 		Node* child_dup = duplications->at(ch).dup;
-	// 		dup->children[ch_idx] = child_dup;
-	// 	}
-	// 	ch_idx++;
-	// }
-
-	duplications->insert({ orig, {dup, parent, child_idx} });
+	duplications->push_back({orig, dup, parent, child_idx});
 	dup_happened = true;
 	return dup;
 }
@@ -273,18 +243,14 @@ sval_t bst::insert(const int tid, const skey_t& key, const sval_t& value)
 	if (key < parent->get_key())
 	{
 		auto parent_dup = dup_prologue(tid, parent);
-		// recmgr->deallocate(tid, parent_dup);
 		parent_dup->set_child(LEFT, create_node(tid, key, value, MAX_CHILDREN));
 		dup_epilogue(tid, parent, parent_dup);
-		// parent->set_child(LEFT, create_node(tid, key, value, MAX_CHILDREN));
 	}
 	else
 	{
 		auto parent_dup = dup_prologue(tid, parent);
-		// recmgr->deallocate(tid, parent_dup);
 		parent_dup->set_child(RIGHT, create_node(tid, key, value, MAX_CHILDREN));
 		dup_epilogue(tid, parent, parent_dup);
-		// parent->set_child(RIGHT, create_node(tid, key, value, MAX_CHILDREN));
 	}
 
 	return NO_VALUE;
@@ -303,7 +269,7 @@ sval_t bst::insert_wrapper(const int tid, const skey_t& key, const sval_t& value
 		{
 			for (auto& d : *duplications)
 			{
-				recmgr->retire(tid, d.first);
+				recmgr->retire(tid, d.orig);
 			}
 			return insertion_res;
 		}
@@ -311,7 +277,7 @@ sval_t bst::insert_wrapper(const int tid, const skey_t& key, const sval_t& value
 		{
 			for (auto& d : *duplications)
 			{
-				recmgr->deallocate(tid, d.second.dup);
+				recmgr->deallocate(tid, d.dup);
 			}
 		}
 	}
@@ -328,12 +294,17 @@ sval_t bst::remove(const int tid, const skey_t& key)
 	if (found == nullptr)
 		return NO_VALUE;
 
-	sval_t res = found->get_value();
+	sval_t res = found->value;
 	if (found->get_child(LEFT) == nullptr && found->get_child(RIGHT) == nullptr)
 	{
 		if (parent == nullptr)
-			found->delete_node();
-		else if (parent->get_key() <= found->get_key())
+		{
+			auto found_dup = dup_prologue(tid, found);
+			found_dup->delete_node();
+			dup_epilogue(tid, found, found_dup);
+		}
+
+		else if (parent->get_key() <= key)
 		{
 			auto parent_dup = dup_prologue(tid, parent);
 			parent_dup->set_child(RIGHT, nullptr);
@@ -360,13 +331,38 @@ template <typename skey_t, typename sval_t, class RecMgr>
 sval_t bst::remove_wrapper(const int tid, const skey_t& key)
 {
 	sval_t removal_res;
-
-	do
+	while (1)
 	{
 		auto guard = recmgr->getGuard(tid);
 		Node::open(root);
 		removal_res = remove(tid, key);
-	} while (!Node::close(root));
+		if (Node::close(root))
+		{
+			for (auto& d : *duplications)
+			{
+				if (!d.orig->is_del())
+				{
+					unsigned int ch_idx = 0;
+					for (auto& ch : d.orig->children)
+					{
+						if (ch != nullptr && d.dup->get_child(ch_idx) == nullptr)
+							recmgr->retire(tid, ch);
+						ch_idx++;
+					}
+				}
+
+				recmgr->retire(tid, d.orig);
+			}
+			return removal_res;
+		}
+		else
+		{
+			for (auto& d : *duplications)
+			{
+				recmgr->deallocate(tid, d.dup);
+			}
+		}
+	}
 
 	return removal_res;
 }
@@ -376,7 +372,7 @@ sval_t bst::search(const int tid, const skey_t& key) {
 	auto guard = recmgr->getGuard(tid, true);
 	auto curr = root;
 
-	while (curr != nullptr && curr->key != key)
+	while (curr != nullptr && (curr->key != key || curr->is_del()))
 	{
 		curr = (key < curr->key) ? curr->children[LEFT] : curr->children[RIGHT];
 	}

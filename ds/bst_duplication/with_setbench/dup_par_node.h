@@ -31,7 +31,6 @@ template <typename skey_t, typename sval_t>
 class node_t
 {
 public:
-// private:
 	skey_t key;
 	sval_t value;
 	unsigned char flags;
@@ -65,22 +64,17 @@ template<typename skey_t, typename sval_t>
 class duplication_info_t
 {
 public:
+	Node* orig;
 	Node* dup;
 	Node* orig_parent;
 	unsigned int orig_idx;
-	uint8_t padding[24];
 };
 
 #define dinfo duplication_info_t<skey_t, sval_t>
 
 template <typename skey_t, typename sval_t>
-thread_local std::unordered_map<Node*, dinfo>* duplications = nullptr;
+thread_local std::vector<dinfo>* duplications = nullptr;
 #define duplications	duplications<skey_t, sval_t>
-
-// template <typename skey_t, typename sval_t>
-// thread_local std::unordered_map<Node*, 
-// 	std::pair<Node*, unsigned int>>* node_parent_map = nullptr;
-// #define node_parent_map	node_parent_map<skey_t, sval_t>
 
 template <typename skey_t, typename sval_t>
 thread_local std::vector<Node*>* path = nullptr;
@@ -100,11 +94,6 @@ thread_local Node* new_root;
 template <typename skey_t, typename sval_t>
 bool Node::open(Node*& root)
 {
-	// if (node_parent_map)
-	// 	node_parent_map->clear();
-	// else
-	// 	node_parent_map = new std::unordered_map<Node*, std::pair<Node*, unsigned int>>();
-
 	if (path)
 		path->clear();
 	else
@@ -113,7 +102,7 @@ bool Node::open(Node*& root)
 	if (duplications)
 		duplications->clear();
 	else
-		duplications = new std::unordered_map<Node*, dinfo>();
+		duplications = new std::vector<dinfo>();
 
 	orig_root = root;
 	new_root = nullptr;
@@ -128,8 +117,8 @@ bool Node::lock_duplications(
 {
 	for (auto& d : *duplications)
 	{
-		auto orig = d.first;
-		auto orig_parent = duplications->at(orig).orig_parent;
+		auto orig = d.orig;
+		auto orig_parent = d.orig_parent;
 		if (orig_parent == nullptr)
 			continue;
 
@@ -176,10 +165,10 @@ bool Node::close(Node*& root)
 
 	for (auto& d : *duplications)
 	{
-		auto orig = d.first;
-		auto dup = d.second.dup;
-		auto orig_parent = d.second.orig_parent;
-		auto orig_idx = d.second.orig_idx;
+		auto orig = d.orig;
+		auto dup = d.dup;
+		auto orig_parent = d.orig_parent;
+		auto orig_idx = d.orig_idx;
 
 		if (orig_parent != nullptr)
 		{
@@ -228,7 +217,6 @@ Node* Node::get_child(unsigned int child_idx)
 	Node* child = children.at(child_idx);
 	if (in_writing_function && child != nullptr)
 	{
-		// node_parent_map->insert({ child, std::make_pair(this, child_idx) });
 		path->push_back(this);
 	}
 
