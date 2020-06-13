@@ -85,45 +85,13 @@ Node* bst::find(
 {
 	auto curr = root;
 
-	while (curr != nullptr && curr->key != key)
+	while (curr != nullptr && (curr->key != key || curr->is_del()))
 	{
 		parent = curr;
 		curr = (key < curr->key) ? curr->get_child(LEFT) : curr->get_child(RIGHT);
 	}
 
 	return curr;
-
-	// while (curr != nullptr)
-	// {
-	// 	auto curr_key = curr->get_key();
-	// 	if (key < curr_key)
-	// 	{
-	// 		parent = curr;
-	// 		curr = curr->get_child(LEFT);
-	// 	}
-	// 	else if (key > curr_key)
-	// 	{
-	// 		parent = curr;
-	// 		curr = curr->get_child(RIGHT);
-	// 	}
-	// 	else
-	// 	{
-	// 		if (!curr->is_deleted())
-	// 		{
-	// 			return curr;
-	// 		}
-	// 		else
-	// 		{
-	// 			parent = curr;
-	// 			if (curr->get_child(RIGHT))
-	// 				curr = curr->get_child(RIGHT);
-	// 			else
-	// 				curr = curr->get_child(LEFT);
-	// 		}
-	// 	}
-	// }
-
-	// return nullptr;
 }
 
 template <typename skey_t, typename sval_t, class RecMgr>
@@ -151,8 +119,8 @@ Node* bst::create_node(const int& tid, const Node& node)
 template <typename skey_t, typename sval_t, class RecMgr>
 Node* bst::path_copy(const int& tid, Node* start)
 {
-	Node* duplication = create_node(tid, *start);
-	duplications->insert({ start, duplication });
+	Node* duplication = start;//create_node(tid, *start);
+	// duplications->insert({ start, duplication });
 
 	Node* current = start;
 	Node* current_dup = duplication;
@@ -160,14 +128,15 @@ Node* bst::path_copy(const int& tid, Node* start)
 	Node* parent_dup;
 
 	bool reached_root = false;
+	std::pair<Node*, unsigned int> pair;
 	while (!(reached_root = (node_parent_map->find(current) == node_parent_map->end())) &&
-		duplications->find(node_parent_map->at(current).first) == duplications->end())
+		(pair = node_parent_map->at(current), duplications->find(pair.first) == duplications->end()))
 	{
-		parent = node_parent_map->at(current).first;
-		auto child_idx = node_parent_map->at(current).second;
-		parent_dup = create_node(tid, *parent);
+		parent = pair.first;
+		auto child_idx = pair.second;
+		parent_dup = parent;//create_node(tid, *parent);
 		parent_dup->children[child_idx] = current_dup;
-		duplications->insert({ parent, parent_dup });
+		// duplications->insert({ parent, parent_dup });
 
 		current = parent;
 		current_dup = parent_dup;
@@ -262,11 +231,13 @@ sval_t bst::insert(const int tid, const skey_t& key, const sval_t& value)
 	{
 		auto parent_dup = path_copy(tid, parent);
 		parent_dup->set_child(LEFT, create_node(tid, key, value, MAX_CHILDREN));
+		// parent->set_child(LEFT, create_node(tid, key, value, MAX_CHILDREN));
 	}
 	else
 	{
 		auto parent_dup = path_copy(tid, parent);
 		parent_dup->set_child(RIGHT, create_node(tid, key, value, MAX_CHILDREN));
+		// parent->set_child(RIGHT, create_node(tid, key, value, MAX_CHILDREN));
 	}
 
 	return NO_VALUE;
@@ -359,10 +330,15 @@ sval_t bst::remove_wrapper(const int tid, const skey_t& key)
 template <typename skey_t, typename sval_t, class RecMgr>
 sval_t bst::search(const int tid, const skey_t& key) {
 	auto guard = recmgr->getGuard(tid, true);
-	Node* parent = nullptr;
-	auto found = find(key, parent);
-	if (found != nullptr)
-		return found->get_value();
+	auto curr = root;
+
+	while (curr != nullptr && (curr->key != key || curr->is_del()))
+	{
+		curr = (key < curr->key) ? curr->children[LEFT] : curr->children[RIGHT];
+	}
+
+	if (curr != nullptr)
+		return curr->value;
 	else
 		return NO_VALUE;
 }

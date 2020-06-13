@@ -23,12 +23,6 @@ public:
 	inline bool is_del() { return (flags & DEL_MASK) == DEL_MASK; }
 	inline void set_del() { flags |= DEL_MASK; }
 
-	// Node* path_copy(const int& tid);
-	
-// public:
-	// node_t(const skey_t& key, const sval_t& value, unsigned int max_num_children);
-	// node_t(const Node& node);
-
 	skey_t get_key();
 	sval_t get_value();
 	Node* get_child(unsigned int child_idx);
@@ -102,68 +96,6 @@ bool Node::close(Node*& root)
 		return true;
 	}
 }
-
-// template <typename skey_t, typename sval_t, class RecMgr>
-// Node* Node::path_copy(const int& tid)
-// {
-// 	// node_t<skey_t>* duplication = new node_t<skey_t>(*this);
-// 	Node* duplication = (Node*)recmgr<RecMgr>->template allocate<Node>(tid, *this);
-// 	duplications.insert({ this, duplication });
-// 	recmgr<RecMgr>->retire(tid, this);
-//
-// 	Node* current = this;
-// 	Node* current_dup = duplication;
-// 	Node* parent;
-// 	Node* parent_dup;
-//
-// 	bool reached_root = false;
-// 	while (!(reached_root = (node_parent_map.find(current) == node_parent_map.end())) &&
-// 		duplications.find(node_parent_map[current].first) == duplications.end())
-// 	{
-// 		parent = node_parent_map[current].first;
-// 		auto child_idx = node_parent_map[current].second;
-// 		// parent_dup = new node_t<skey_t>(*parent);
-// 		parent_dup = (Node*)recmgr<RecMgr>->template allocate<Node>(tid, *parent);
-// 		parent_dup->children[child_idx] = current_dup;
-//
-// 		duplications.insert({ parent, parent_dup });
-// 		recmgr<RecMgr>->retire(tid, parent);
-//
-// 		current = parent;
-// 		current_dup = parent_dup;
-// 	}
-//
-// 	if (reached_root)
-// 	{
-// 		new_root = current_dup;
-// 	}
-// 	else // reached a duplicated parent
-// 	{
-// 		auto parent = node_parent_map[current].first;
-// 		auto child_idx = node_parent_map[current].second;
-// 		auto to_update = duplications[parent];
-// 		to_update->children[child_idx] = current_dup;
-// 	}
-//
-// 	pc_happened = true;
-// 	return duplication;
-// }
-
-// template <typename skey_t, typename sval_t>
-// Node::node_t(const skey_t& key, const sval_t& value, unsigned int max_num_children) :
-// 	key(key),
-// 	value(value),
-// 	children(max_num_children, nullptr),
-// 	flags(0)
-// {}
-
-// template <typename skey_t, typename sval_t>
-// Node::node_t(const Node& node) :
-// 	key(node.key),
-// 	value(node.value),
-// 	children(node.children),
-// 	flags(node.flags)
-// {}
 
 template <typename skey_t, typename sval_t>
 skey_t Node::get_key() 
