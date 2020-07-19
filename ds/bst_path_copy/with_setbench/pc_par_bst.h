@@ -119,8 +119,8 @@ Node* bst::create_node(const int& tid, const Node& node)
 template <typename skey_t, typename sval_t, class RecMgr>
 Node* bst::path_copy(const int& tid, Node* start)
 {
-	Node* duplication = start;//create_node(tid, *start);
-	// duplications->insert({ start, duplication });
+	Node* duplication = create_node(tid, *start);
+	duplications->insert({ start, duplication });
 
 	Node* current = start;
 	Node* current_dup = duplication;
@@ -134,9 +134,9 @@ Node* bst::path_copy(const int& tid, Node* start)
 	{
 		parent = pair.first;
 		auto child_idx = pair.second;
-		parent_dup = parent;//create_node(tid, *parent);
+		parent_dup = create_node(tid, *parent);
 		parent_dup->children[child_idx] = current_dup;
-		// duplications->insert({ parent, parent_dup });
+		duplications->insert({ parent, parent_dup });
 
 		current = parent;
 		current_dup = parent_dup;
@@ -215,9 +215,10 @@ Node* bst::get_root()
 template <typename skey_t, typename sval_t, class RecMgr>
 sval_t bst::insert(const int tid, const skey_t& key, const sval_t& value)
 {
-	if (root == nullptr)
+	if (orig_root == nullptr)
 	{
-		root = create_node(tid, key, value, MAX_CHILDREN);
+		pc_happened = true;
+		new_root = create_node(tid, key, value, MAX_CHILDREN);
 		return NO_VALUE;
 	}
 

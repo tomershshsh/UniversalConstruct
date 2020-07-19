@@ -8,7 +8,7 @@
 #define Node node_t<skey_t, sval_t>
 
 const unsigned char DEL_MASK = 0x02;
-static std::mutex g_mutex;
+// static std::mutex g_mutex;
 
 template <typename skey_t, typename sval_t>
 class node_t
@@ -82,14 +82,15 @@ bool Node::close(Node*& root)
 
 	if (pc_happened)
 	{
-		std::lock_guard<std::mutex> lock(g_mutex);
-		if (root == orig_root)
-		{
-			root = new_root;
-			return true;
-		}
+		// std::lock_guard<std::mutex> lock(g_mutex);
+		// if (root == orig_root)
+		// {
+		// 	root = new_root;
+		// 	return true;
+		// }
 
-		return false;
+		// return false;
+		return __atomic_compare_exchange_n(&root, &orig_root, new_root, true, __ATOMIC_RELAXED, __ATOMIC_RELAXED);
 	}
 	else
 	{

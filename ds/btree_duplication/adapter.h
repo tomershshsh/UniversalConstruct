@@ -16,7 +16,7 @@
 #   define TREE_STATS_BYTES_AT_DEPTH
 #   include "tree_stats.h"
 #endif
-#include "btree_ser.hpp"
+#include "btree_dup.hpp"
 #include <iostream>
 
 #define RECORD_MANAGER_T record_manager<Reclaim, Alloc, Pool, tlx::inner_node<K, std::pair<K,V>>, tlx::leaf_node<K, std::pair<K,V>>>

@@ -126,6 +126,7 @@ Node* bst::dup_epilogue(const int& tid, Node* orig, Node* dup)
 	Node* parent = nullptr;
 	unsigned int child_idx = MAX_UINT;	
 
+	/* find duplication's parent */
 	if (orig != orig_root)
 	{
 		for (auto it = path->rbegin(); it != path->rend(); ++it)
@@ -149,6 +150,7 @@ Node* bst::dup_epilogue(const int& tid, Node* orig, Node* dup)
 	}
 
 FOUND:
+	/* update if there is another duplication in the neighborhood */
 	for (auto& d : *duplications)
 	{
 		if (parent != nullptr && d.orig->key == dup->key)
@@ -228,12 +230,23 @@ Node* bst::get_root()
 template <typename skey_t, typename sval_t, class RecMgr>
 sval_t bst::insert(const int tid, const skey_t& key, const sval_t& value)
 {
+	/* 1st insertion */
 	if (root == nullptr)
 	{
-		root = create_node(tid, key, value, MAX_CHILDREN);
-		return NO_VALUE;
+		Node* new_node = create_node(tid, key, value, MAX_CHILDREN);
+		Node* null_node = nullptr;
+
+		if (__atomic_compare_exchange_n(
+				&root, 
+				&null_node, 
+				new_node, 
+				true, 
+				__ATOMIC_RELAXED, 
+				__ATOMIC_RELAXED))
+			return NO_VALUE;
 	}
 
+	/* regular insertion */
 	Node* parent = nullptr;
 	auto found = find(key, parent);
 
