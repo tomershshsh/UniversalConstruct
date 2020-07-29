@@ -42,10 +42,8 @@ public:
 	inline bool is_del() { return (flags & DEL_MASK) == DEL_MASK; }
 	inline void set_del() { flags |= DEL_MASK; }
 	
-	static bool lock_duplications(
-		std::vector<Node*>& locked);
-	static void unlock_duplications(
-		std::vector<Node*>& locked);
+	static bool lock_duplications();
+	static void unlock_duplications();
 
 	skey_t get_key();
 	sval_t get_value();
@@ -80,6 +78,10 @@ template <typename skey_t, typename sval_t>
 thread_local std::vector<Node*>* path = nullptr;
 #define path path<skey_t, sval_t>
 
+template <typename skey_t, typename sval_t>
+thread_local std::vector<Node*>* locked = nullptr;
+#define locked locked<skey_t, sval_t>
+
 thread_local bool in_writing_function = false;
 thread_local bool dup_happened = false;
 
@@ -104,6 +106,11 @@ bool Node::open(Node*& root)
 	else
 		duplications = new std::vector<dinfo>();
 
+	if (locked)
+		locked->clear();
+	else
+		locked = new std::vector<Node*>();
+
 	orig_root = root;
 	new_root = nullptr;
 	in_writing_function = true;
@@ -112,38 +119,36 @@ bool Node::open(Node*& root)
 }
 
 template <typename skey_t, typename sval_t>
-bool Node::lock_duplications(
-	std::vector<Node*>& locked)
+bool Node::lock_duplications()
 {
-	for (auto& d : *duplications)
-	{
-		auto orig = d.orig;
-		auto orig_parent = d.orig_parent;
-		if (orig_parent == nullptr)
-			continue;
+	// for (auto& d : *duplications)
+	// {
+	// 	auto orig = d.orig;
+	// 	auto orig_parent = d.orig_parent;
+	// 	if (orig_parent == nullptr)
+	// 		continue;
 
-		if (!pthread_spin_trylock(&orig_parent->dup_lock))
-		{
-			locked.push_back(orig_parent);
-			if (!pthread_spin_trylock(&orig->dup_lock))
-			{
-				locked.push_back(orig);
-				continue;
-			}			
-		}
+	// 	if (!pthread_spin_trylock(&orig_parent->dup_lock))
+	// 	{
+	// 		locked->push_back(orig_parent);
+	// 		if (!pthread_spin_trylock(&orig->dup_lock))
+	// 		{
+	// 			locked->push_back(orig);
+	// 			continue;
+	// 		}	
+	// 	}
 		
-		unlock_duplications(locked);
-		return false;
-	}
+	// 	unlock_duplications();
+	// 	return false;
+	// }
 
 	return true;
 }
 
 template<typename skey_t, typename sval_t>
-void Node::unlock_duplications(
-	std::vector<Node*>& locked)
+void Node::unlock_duplications()
 {
-	for (auto& l : locked)
+	for (auto& l : *locked)
 	{
 		pthread_spin_unlock(&l->dup_lock);
 	}
@@ -156,8 +161,7 @@ bool Node::close(Node*& root)
 	if (!dup_happened)
 		return true;
 
-	std::vector<Node*> locked;
-	if (!lock_duplications(locked))
+	if (!lock_duplications())
 		return false;
 
 	/* check that parent-child relations are as expected */
@@ -168,7 +172,8 @@ bool Node::close(Node*& root)
 		auto orig_idx = d.orig_idx;
 
 		if (orig_parent != nullptr && orig_parent->children[orig_idx] != orig) {
-			unlock_duplications(locked);
+			unlock_duplications();
+			pthread_spin_unlock(&orig->dup_lock);
 			return false;
 		}
 	}
@@ -191,7 +196,8 @@ bool Node::close(Node*& root)
 					__ATOMIC_RELAXED, 
 					__ATOMIC_RELAXED))
 			{
-				unlock_duplications(locked);
+				unlock_duplications();
+				pthread_spin_unlock(&orig->dup_lock);
 				return false;
 			}
 		}
@@ -205,13 +211,14 @@ bool Node::close(Node*& root)
 					__ATOMIC_RELAXED, 
 					__ATOMIC_RELAXED))
 			{
-				unlock_duplications(locked);
+				unlock_duplications();
+				pthread_spin_unlock(&orig->dup_lock);
 				return false;
 			}
 		}
 	}
 
-	unlock_duplications(locked);
+	unlock_duplications();
 	return true;
 }
 
