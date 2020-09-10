@@ -23,6 +23,7 @@
 #include <ostream>
 #include <utility>
 #include <cstring>
+#include <iostream>
 
 namespace tlx {
 

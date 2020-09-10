@@ -4,7 +4,7 @@
 #include "record_manager.h"
 
 template <typename skey_t, typename sval_t, class RecMgr>
-class btree_ser {
+class btree_dup {
 public:
     //! \name Template Parameter Types
     //! \{
@@ -32,7 +32,7 @@ public:
     //! \{
 
     //! Typedef of our own type
-    typedef btree_ser<key_type, data_type, RecMgr> self;
+    typedef btree_dup<key_type, data_type, RecMgr> self;
 
     //! Construct the STL-required value_type as a composition pair of key and
     //! data types
@@ -136,7 +136,7 @@ public:
 
     //! Default constructor initializing an empty B+ tree with the standard key
     //! comparison function
-    explicit btree_ser(
+    explicit btree_dup(
         const int _NUM_THREADS, 
         const skey_t& _KEY_MIN, 
         const skey_t& _KEY_MAX, 
@@ -154,7 +154,7 @@ public:
     }
 
     //! Frees up all used B+ tree memory pages
-    ~btree_ser()
+    ~btree_dup()
     {
         delete tree_.recmgr; 
     }
@@ -218,13 +218,16 @@ public:
 
     //! Tries to locate a key in the B+ tree and returns an iterator to the
     //! key/data slot if found. If unsuccessful it returns end().
-    sval_t find(const int tid, const skey_t& key) {
+    sval_t find(const int tid, const skey_t& key) 
+    {
         auto guard = tree_.recmgr->getGuard(tid, true);
         auto it = tree_.find(key);
-        if (it == tree_.end())
+        if (it == tree_.end()) {
             return NO_VALUE;
-        else
+        }
+        else {
             return (*it).second;
+        }
     }
 
 public:
@@ -233,13 +236,46 @@ public:
 
     //! Attempt to insert a key/data pair into the B+ tree. Fails if the pair is
     //! already present.
-    sval_t insert(const int tid, const skey_t& key, const sval_t& value) {
-        auto guard = tree_.recmgr->getGuard(tid);
-        auto res = tree_.insert(tid, std::make_pair(key, value));
-        if (res.second)
-            return NO_VALUE;
-        else
-            return value;
+    sval_t insert(const int tid, const skey_t& key, const sval_t& value) 
+    {
+        while (1)
+        {
+            auto guard = tree_.recmgr->getGuard(tid);
+            tlx::dup_open<key_type, value_type>(tree_.root_);
+            tlx::locking_res = true;
+            auto insertion_res = tree_.insert(tid, std::make_pair(key, value));
+            if ( tlx::dup_close<key_type, value_type>(tree_.root_) && tlx::locking_res) //TODO
+            {
+                for (auto& d : *tlx::duplications)
+                {
+                    if (d.first->is_leafnode()) {
+                        tree_.recmgr->retire(tid, static_cast<tlx::leaf_node<key_type, value_type>*>(d.first));
+                    }
+                    else {
+                        tree_.recmgr->retire(tid, static_cast<tlx::inner_node<key_type, value_type>*>(d.first));
+                    }
+                }
+
+                if (insertion_res.second)
+                    return NO_VALUE;
+                else
+                    return value;
+            }
+            else
+            {
+                for (auto& d : *tlx::allocated)
+                {
+                    if (d.first->is_leafnode()) {
+                        tree_.recmgr->deallocate(tid, static_cast<tlx::leaf_node<key_type, value_type>*>(d.first));
+                    }
+                    else {
+                        tree_.recmgr->deallocate(tid, static_cast<tlx::inner_node<key_type, value_type>*>(d.first));
+                    }
+
+                    // recmgr->deallocate(tid, d.first);
+                }
+            }
+        }
     }
 
     //! \}
@@ -250,12 +286,34 @@ public:
 
     //! Erases the key/data pairs associated with the given key. For this
     //! unique-associative map there is no difference to erase().
-    sval_t erase(const int tid, const skey_t& key) {
-        auto guard = tree_.recmgr->getGuard(tid);
-        if (tree_.erase_one(tid, key))
-            return (sval_t)(&key);
-        else
-            return NO_VALUE;
+    sval_t erase(const int tid, const skey_t& key) 
+    {
+        while (1)
+        {
+            auto guard = tree_.recmgr->getGuard(tid);
+            tlx::dup_open<key_type, value_type>(tree_.root_);
+            tlx::locking_res = true;
+            auto removal_res = tree_.erase_one(tid, key);
+            if ( tlx::dup_close<key_type, value_type>(tree_.root_) && tlx::locking_res)
+            {
+                if (removal_res)
+                    return (sval_t)(&key);
+                else
+                    return NO_VALUE;
+            }
+            else
+            {
+                for (auto& d : *tlx::allocated)
+                {
+                    if (d.first->is_leafnode()) {
+                        tree_.recmgr->deallocate(tid, static_cast<tlx::leaf_node<key_type, value_type>*>(d.first));
+                    }
+                    else {
+                        tree_.recmgr->deallocate(tid, static_cast<tlx::inner_node<key_type, value_type>*>(d.first));
+                    }
+                }
+            }
+        }
     }
 
     //! \}

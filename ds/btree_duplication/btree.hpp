@@ -31,6 +31,7 @@ namespace tlx {
 //! B+ tree variants
 //! \{
 
+thread_local bool locking_res = true;
 
 /*!
  * Basic class implementing a B+ tree data structure in memory.
@@ -228,6 +229,7 @@ public:
 
         //! Dereference the iterator.
         reference operator * () const {
+            auto bla = curr_leaf->get_slot(0);             
             return curr_leaf->get_slot(curr_slot);
         }
 
@@ -1096,22 +1098,34 @@ private:
     //! Correctly free either inner or leaf node, destructs all contained key
     //! and value objects.
     void free_node(const int& tid, node* n) {
-        if (n->is_leafnode()) {
-            LeafNode* ln = static_cast<LeafNode*>(n);
-            // typename LeafNode::alloc_type a(leaf_node_allocator());
-            // a.destroy(ln);
-            // a.deallocate(ln, 1);
-            recmgr->deallocate(tid, ln);
-            stats_.leaves--;
-        }
-        else {
-            InnerNode* in = static_cast<InnerNode*>(n);
-            // typename InnerNode::alloc_type a(inner_node_allocator());
-            // a.destroy(in);
-            // a.deallocate(in, 1);
-            recmgr->deallocate(tid, in);
-            stats_.inner_nodes--;
-        }
+        // if (n->is_leafnode()) {
+        //     LeafNode* ln = static_cast<LeafNode*>(n);
+        //     if (duplications->find(ln) != duplications->end())
+        //     {
+        //         auto found = duplications->at(ln);
+        //         recmgr->deallocate(tid, static_cast<LeafNode*>(found.dup));
+        //     }
+        //     else
+        //     {
+        //         recmgr->retire(tid, ln);
+        //     }
+            
+        //     stats_.leaves--;
+        // }
+        // else {
+        //     InnerNode* in = static_cast<InnerNode*>(n);
+        //     if (duplications->find(in) != duplications->end())
+        //     {
+        //         auto found = duplications->at(in);
+        //         recmgr->deallocate(tid, static_cast<InnerNode*>(found.dup));
+        //     }
+        //     else
+        //     {
+        //         recmgr->retire(tid, in);
+        //     }
+
+        //     stats_.inner_nodes--;
+        // }
     }
 
     //! \}
@@ -1120,8 +1134,85 @@ public:
     //! \name Duplication functions
     //! 
     //! \{
+    
+    bool is_locked(node * n)
+    {
+        if(pthread_spin_trylock(&n->dup_lock) == 0)
+        {
+            //lock was successful
+            pthread_spin_unlock(&n->dup_lock);
+            return false;
+        }
+        else
+        {
+            return true;
+        }
+    }
 
-    node * dup_prologue(const int& tid, node * orig) {
+    bool check_tree(node * n)
+    {
+        bool result = true;
+        if (n->is_leafnode())
+        {
+            if (is_locked(n)) {
+                std::cout << "check_tree: leaf - " << n << std::endl;
+                return false;
+            }
+        }
+        else
+        {
+            InnerNode * in = static_cast<InnerNode *>(n);
+            for (int i = 0; i <= n->slotuse; i++)
+            {
+                if (is_locked(n)) {
+                    std::cout << "check_tree: inner - " << in << std::endl;
+                    return false;
+                }
+
+                if (!check_tree(in->childid[i]))
+                {
+                    std::cout << "check_tree: \tparent - " << in << std::endl;
+                    return false;
+                }
+            }
+        }
+
+        return result;
+    }
+
+    node * dup_prologue(const int& tid, node * orig) 
+    {
+        if (allocated->find(orig) != allocated->end())
+        {
+            return orig;
+        }
+
+        if (duplications->find(orig) != duplications->end())
+        {
+            auto found = duplications->at(orig);
+            return found.dup;
+        }
+
+        if (locked->find(orig) == locked->end()) 
+        {
+            auto bla = pthread_spin_trylock(&orig->dup_lock);
+            if (!bla)
+            {
+                locked->insert(std::make_pair(orig, false));
+            }
+            else
+            {
+                std::cout << "damn " << orig << " " << bla << std::endl;
+                locking_res = false;
+                return nullptr;
+            }
+        }
+        else
+        {
+            (*locked)[orig] = false;
+        }
+        
+
         if (orig->is_leafnode())
             return (node *)allocate_leaf(tid, static_cast<LeafNode*>(orig));
         else
@@ -1132,29 +1223,51 @@ public:
     {
         node * parent = nullptr;
         unsigned int child_idx = MAX_UINT;	
+        bool do_insert = false;
 
-        if (orig != orig_root)
+        if (orig != dup && duplications->find(dup) == duplications->end())
         {
-            for (auto it = path->rbegin(); it != path->rend(); ++it)
+            /* find duplication's parent */
+            if (orig != orig_root)
             {
-                if ((*it).child == orig)
+                if (node_parent_map->find(orig) != node_parent_map->end())
                 {
-                    parent = (*it).parent;
-                    child_idx = (*it).child_idx;
-                    break;
+                    auto found = node_parent_map->at(orig);
+                    parent = found.first;
+                    child_idx = found.second;
                 }
             }
-        }
-        else
-        {
-            new_root = dup;
+            else
+            {
+                new_root = dup;
+            }
+            
+            /* lock parent (orig is already locked in dup_prologue) */
+            if (parent != nullptr && locked->find(parent) == locked->end())
+            {
+                if (!pthread_spin_trylock(&parent->dup_lock))
+                {
+                    // locked->push_back(std::make_pair(parent, true));
+                    locked->insert(std::make_pair(parent, true));
+                }
+                else
+                {
+                    dup_unlock_duplications(true);
+                    locking_res = false;
+                    return nullptr;
+                }
+            }
+
+            do_insert = true;
         }
 
+        /* update if there is another duplication in the neighborhood */
         for (auto& d : *duplications)
         {
-            if (d.orig == parent)
+
+            if (d.first == parent)
             {
-                (static_cast<InnerNode*>(d.dup))->childid[child_idx] = dup;
+                (static_cast<InnerNode*>(d.second.dup))->childid[child_idx] = dup;
                 // d.dup->children[child_idx] = dup;
                 continue;
             }
@@ -1162,25 +1275,21 @@ public:
             if (!dup->is_leafnode())
             {
                 InnerNode * i_dup = static_cast<InnerNode*>(dup);
-                for (unsigned int idx = 0; idx < i_dup->slotuse; idx++)
-                {
-                    if (i_dup->childid[idx] == d.orig)
+                for (unsigned int idx = 0; idx <= i_dup->slotuse; idx++)
+                {                  
+                    if (i_dup->childid[idx] == d.first)
                     {
-                        i_dup->childid[idx] = d.dup;
+                        i_dup->childid[idx] = d.second.dup;
                     }
                 }
             }
-
-            // unsigned int ch_idx = 0;
-            // for (auto& ch : dup->children)
-            // {
-            //     if (ch != nullptr && d.orig->key == ch->key)
-            //         dup->children[ch_idx] = d.dup;
-            //     ch_idx++;
-            // }
         }
 
-        duplications->push_back({orig, dup, parent, child_idx});
+        if (do_insert)
+        {
+            duplications->insert({orig, {dup, parent, child_idx}});
+        }
+
         dup_happened = true;
         return dup;
     }
@@ -1703,7 +1812,8 @@ private:
             newleaf->set_slotuse(leaf->get_slotuse());
             newleaf->copy_to_slotdata(
                     leaf->get_slotdata_vec(), 
-                    leaf->get_slotdata_vec() + leaf->get_slotuse(), 0);
+                    leaf->get_slotdata_vec() + leaf->get_slotuse(), 
+                    newleaf->get_slotdata_vec());
 
             if (head_leaf_ == nullptr)
             {
@@ -1727,7 +1837,8 @@ private:
             newinner->set_slotuse(inner->get_slotuse());
             newinner->copy_to_slotkey(
                 inner->get_slotkey_vec(), 
-                inner->get_slotkey_vec() + inner->get_slotuse(), 0);
+                inner->get_slotkey_vec() + inner->get_slotuse(), 
+                newinner->get_slotkey_vec());
 
             for (unsigned short slot = 0; slot <= inner->get_slotuse(); ++slot)
             {
@@ -1786,7 +1897,7 @@ private:
         if (root_ == nullptr) {
             root_ = head_leaf_ = tail_leaf_ = allocate_leaf(tid);
         }
-
+        
         std::pair<iterator, bool> r =
             insert_descend(tid, root_, key, value, &newkey, &newchild);
 
@@ -1796,14 +1907,19 @@ private:
             // into the root node, this mean the root is full and a new root
             // needs to be created.
             InnerNode* newroot = allocate_inner(tid, root_->get_level() + 1);
-            newroot->set_slotkey(0, newkey);
 
-            newroot->set_child(0, root_);
-            newroot->set_child(1, newchild);
+            auto newroot_dup = static_cast<InnerNode*>(dup_prologue(tid, newroot));
+            if (newroot_dup != nullptr) {
+                newroot_dup->set_slotkey(0, newkey);
 
-            newroot->set_slotuse(1);
+                newroot_dup->set_child(0, root_);
+                newroot_dup->set_child(1, newchild);
 
-            /* TOMER CHANGE */
+                newroot_dup->set_slotuse(1);
+                dup_epilogue(tid, newroot, newroot_dup);
+            }
+
+            /* TOMER CHANGE - TODO */
             new_root = newroot;
             // root_ = newroot;
         }
@@ -1833,14 +1949,14 @@ private:
     std::pair<iterator, bool> insert_descend(
         const int& tid, node* n, const key_type& key, const value_type& value,
         key_type* splitkey, node** splitnode) {
-
+        
         if (!n->is_leafnode())
         {
             InnerNode* inner = static_cast<InnerNode*>(n);
 
             key_type newkey = key_type();
             node* newchild = nullptr;
-
+            
             unsigned short slot = find_lower(inner, key);
 
             TLX_BTREE_PRINT(
@@ -1858,7 +1974,7 @@ private:
 
                 if (inner->is_full())
                 {
-                    split_inner_node(inner, splitkey, splitnode, slot);
+                    split_inner_node(tid, inner, splitkey, splitnode, slot);
 
                     TLX_BTREE_PRINT("BTree::insert_descend done split_inner:" <<
                                     " putslot: " << slot <<
@@ -1889,13 +2005,23 @@ private:
                         InnerNode* split = static_cast<InnerNode*>(*splitnode);
 
                         // move the split key and it's datum into the left node
-                        inner->set_slotkey(inner->get_slotuse(), *splitkey);
-                        inner->set_child(inner->get_slotuse() + 1, split->get_child(0));
-                        inner->set_slotuse(inner->get_slotuse() + 1);
+                        
+                        auto inner_dup = static_cast<InnerNode*>(dup_prologue(tid, inner));
+                        if (inner_dup != nullptr) {
+                            inner_dup->set_slotkey(inner_dup->get_slotuse(), *splitkey);
+                            inner_dup->set_child(inner_dup->get_slotuse() + 1, split->get_child(0));
+                            inner_dup->set_slotuse(inner_dup->get_slotuse() + 1);
+                            dup_epilogue(tid, inner, inner_dup);
+                        }
 
                         // set new split key and move corresponding datum into
                         // right node
-                        split->set_child(0, newchild);
+                        auto split_dup = static_cast<InnerNode*>(dup_prologue(tid, split));
+                        if (split_dup != nullptr) {
+                            split_dup->set_child(0, newchild);
+                            dup_epilogue(tid, split, split_dup);
+                        }
+
                         *splitkey = newkey;
 
                         return r;
@@ -1904,7 +2030,7 @@ private:
                     {
                         // in case the insert slot is in the newly create split
                         // node, we reuse the code below.
-
+                        
                         slot -= inner->get_slotuse() + 1;
                         inner = static_cast<InnerNode*>(*splitnode);
                         TLX_BTREE_PRINT(
@@ -1916,18 +2042,22 @@ private:
                 // move items and put pointer to child node into correct slot
                 TLX_BTREE_ASSERT(slot >= 0 && slot <= inner->get_slotuse());
 
-                inner->copy_backward_to_slotkey(
-                    inner->get_slotkey_vec() + slot, 
-                    inner->get_slotkey_vec() + inner->get_slotuse(),
-                    inner->get_slotuse() + 1);
-                inner->copy_backward_to_childid(
-                    inner->get_childid_vec() + slot, 
-                    inner->get_childid_vec() + inner->get_slotuse() + 1,
-                    inner->get_slotuse() + 2);
+                auto inner_dup = static_cast<InnerNode*>(dup_prologue(tid, inner));
+                if (inner_dup != nullptr) {
+                    inner_dup->copy_backward_to_slotkey(
+                        inner_dup->get_slotkey_vec() + slot, 
+                        inner_dup->get_slotkey_vec() + inner_dup->get_slotuse(),
+                        inner_dup->get_slotkey_vec() + inner_dup->get_slotuse() + 1);
+                    inner_dup->copy_backward_to_childid(
+                        inner_dup->get_childid_vec() + slot, 
+                        inner_dup->get_childid_vec() + inner_dup->get_slotuse() + 1,
+                        inner_dup->get_childid_vec() + inner_dup->get_slotuse() + 2);
 
-                inner->set_slotkey(slot, newkey);
-                inner->set_child(slot + 1, newchild);
-                inner->set_slotuse(inner->get_slotuse() + 1);
+                    inner_dup->set_slotkey(slot, newkey);
+                    inner_dup->set_child(slot + 1, newchild);
+                    inner_dup->set_slotuse(inner_dup->get_slotuse() + 1);
+                    dup_epilogue(tid, inner, inner_dup);
+                }
             }
 
             return r;
@@ -1939,7 +2069,8 @@ private:
             unsigned short slot = find_lower(leaf, key);
 
             if (!allow_duplicates &&
-                slot < leaf->get_slotuse() && key_equal(key, leaf->key(slot))) {
+                slot < leaf->get_slotuse() && key_equal(key, leaf->key(slot))) 
+            {
                 return std::pair<iterator, bool>(iterator(leaf, slot), false);
             }
 
@@ -1958,13 +2089,17 @@ private:
             // move items and put data item into correct data slot
             TLX_BTREE_ASSERT(slot >= 0 && slot <= leaf->get_slotuse());
 
-            leaf->copy_backward_to_slotdata(
-                leaf->get_slotdata_vec() + slot, 
-                leaf->get_slotdata_vec() + leaf->get_slotuse(),
-                leaf->get_slotuse() + 1);
+            auto leaf_dup = static_cast<LeafNode*>(dup_prologue(tid, leaf));
+            if (leaf_dup != nullptr) {
+                leaf_dup->copy_backward_to_slotdata(
+                    leaf_dup->get_slotdata_vec() + slot, 
+                    leaf_dup->get_slotdata_vec() + leaf_dup->get_slotuse(),
+                    leaf_dup->get_slotdata_vec() + leaf_dup->get_slotuse() + 1);
 
-            leaf->set_slot(slot, value);
-            leaf->set_slotuse(leaf->get_slotuse() + 1);
+                leaf_dup->set_slot(slot, value);
+                leaf_dup->set_slotuse(leaf_dup->get_slotuse() + 1);
+                dup_epilogue(tid, leaf, leaf_dup);
+            }
 
             if (splitnode && leaf != *splitnode && slot == leaf->get_slotuse() - 1)
             {
@@ -1989,22 +2124,34 @@ private:
 
         LeafNode* newleaf = allocate_leaf(tid);
 
-        newleaf->set_slotuse(leaf->get_slotuse() - mid);
+        auto newleaf_dup = static_cast<LeafNode*>(dup_prologue(tid, newleaf));
+        if (newleaf_dup != nullptr) {
+            newleaf_dup->set_slotuse(leaf->get_slotuse() - mid);
 
-        newleaf->next_leaf = leaf->next_leaf;
-        if (newleaf->next_leaf == nullptr) {
-            TLX_BTREE_ASSERT(leaf == tail_leaf_);
-            tail_leaf_ = newleaf;
+            /* ITERATOR ISSUE - TODO */
+            newleaf->next_leaf = leaf->next_leaf;
+            if (newleaf->next_leaf == nullptr) {
+                TLX_BTREE_ASSERT(leaf == tail_leaf_);
+                tail_leaf_ = newleaf;
+            }
+            else {
+                newleaf->next_leaf->prev_leaf = newleaf;
+            }
+
+            newleaf_dup->copy_to_slotdata(
+                    leaf->get_slotdata_vec() + mid, 
+                    leaf->get_slotdata_vec() + leaf->get_slotuse(), 
+                    newleaf_dup->get_slotdata_vec());
+            dup_epilogue(tid, newleaf, newleaf_dup);
         }
-        else {
-            newleaf->next_leaf->prev_leaf = newleaf;
+
+        auto leaf_dup = static_cast<LeafNode*>(dup_prologue(tid, leaf));
+        if (leaf_dup != nullptr) {
+            leaf_dup->set_slotuse(mid);
+            dup_epilogue(tid, leaf, leaf_dup);
         }
 
-        newleaf->copy_to_slotdata(
-                leaf->get_slotdata_vec() + mid, 
-                leaf->get_slotdata_vec() + leaf->get_slotuse(), 0);
-
-        leaf->set_slotuse(mid);
+        /* ITERATOR ISSUE - TODO */
         leaf->next_leaf = newleaf;
         newleaf->prev_leaf = leaf;
 
@@ -2016,7 +2163,7 @@ private:
     //! the new nodes and it's insertion key in the two parameters. Requires the
     //! slot of the item will be inserted, so the nodes will be the same size
     //! after the insert.
-    void split_inner_node(InnerNode* inner, key_type* out_newkey,
+    void split_inner_node(const int& tid, InnerNode* inner, key_type* out_newkey,
                           node** out_newinner, unsigned int addslot) {
         TLX_BTREE_ASSERT(inner->is_full());
 
@@ -2039,16 +2186,26 @@ private:
 
         InnerNode* newinner = allocate_inner(tid, inner->get_level());
 
-        newinner->set_slotuse(inner->get_slotuse() - (mid + 1));
+        auto newinner_dup = static_cast<InnerNode*>(dup_prologue(tid, newinner));
+        if (newinner_dup != nullptr) {
+            newinner_dup->set_slotuse(inner->get_slotuse() - (mid + 1));
 
-        newinner->copy_to_slotkey(
-            inner->get_slotkey_vec() + mid + 1, 
-            inner->get_slotkey_vec() + inner->get_slotuse(), 0);
-        newinner->copy_to_childid(
-            inner->get_childid_vec() + mid + 1, 
-            inner->get_childid_vec() + inner->get_slotuse() + 1, 0);
+            newinner_dup->copy_to_slotkey(
+                inner->get_slotkey_vec() + mid + 1, 
+                inner->get_slotkey_vec() + inner->get_slotuse(), 
+                newinner_dup->get_slotkey_vec());
+            newinner_dup->copy_to_childid(
+                inner->get_childid_vec() + mid + 1, 
+                inner->get_childid_vec() + inner->get_slotuse() + 1, 
+                newinner_dup->get_childid_vec());
+            dup_epilogue(tid, newinner, newinner_dup);
+        }
 
-        inner->set_slotuse(mid);
+        auto inner_dup = static_cast<InnerNode*>(dup_prologue(tid, inner));
+        if (inner_dup != nullptr) {
+            inner_dup->set_slotuse(mid);
+            dup_epilogue(tid, inner, inner_dup);
+        }
 
         *out_newkey = inner->key(mid);
         *out_newinner = newinner;
@@ -2363,6 +2520,7 @@ private:
                                node* left, node* right,
                                InnerNode* left_parent, InnerNode* right_parent,
                                InnerNode* parent, unsigned int parentslot) {
+        
         if (curr->is_leafnode())
         {
             LeafNode* leaf = static_cast<LeafNode*>(curr);
@@ -2380,13 +2538,14 @@ private:
 
             TLX_BTREE_PRINT(
                 "Found key in leaf " << curr << " at slot " << slot);
-
-            leaf->copy_to_slotdata(
-                    leaf->get_slotdata_vec() + slot + 1, 
-                    leaf->get_slotdata_vec() + leaf->get_slotuse(),
-                    slot);
-
-            leaf->set_slotuse(leaf->get_slotuse() - 1);
+            
+            auto leaf_dup = static_cast<LeafNode*>(dup_prologue(tid, leaf));
+            leaf_dup->copy_to_slotdata(
+                    leaf_dup->get_slotdata_vec() + slot + 1, 
+                    leaf_dup->get_slotdata_vec() + leaf_dup->get_slotuse(),
+                    leaf_dup->get_slotdata_vec() + slot);
+            leaf_dup->set_slotuse(leaf_dup->get_slotuse() - 1);
+            dup_epilogue(tid, leaf, leaf_dup);
 
             result_t myres = btree_ok;
 
@@ -2397,7 +2556,9 @@ private:
                 if (parent && parentslot < parent->get_slotuse())
                 {
                     TLX_BTREE_ASSERT(parent->get_child(parentslot) == curr);
-                    parent->set_slotkey(parentslot, leaf->key(leaf->get_slotuse() - 1));
+                    auto parent_dup = static_cast<InnerNode*>(dup_prologue(tid, parent));
+                    parent_dup->set_slotkey(parentslot, leaf->key(leaf->get_slotuse() - 1));
+                    dup_epilogue(tid, parent, parent_dup);
                 }
                 else
                 {
@@ -2445,9 +2606,9 @@ private:
                          (right_leaf == nullptr || right_leaf->is_few()))
                 {
                     if (left_parent == parent)
-                        myres |= merge_leaves(left_leaf, leaf, left_parent);
+                        myres |= merge_leaves(tid, left_leaf, leaf, left_parent);
                     else
-                        myres |= merge_leaves(leaf, right_leaf, right_parent);
+                        myres |= merge_leaves(tid, leaf, right_leaf, right_parent);
                 }
                 // case : the right leaf has extra data, so balance right with
                 // current
@@ -2456,9 +2617,9 @@ private:
                 {
                     if (right_parent == parent)
                         myres |= shift_left_leaf(
-                            leaf, right_leaf, right_parent, parentslot);
+                            tid, leaf, right_leaf, right_parent, parentslot);
                     else
-                        myres |= merge_leaves(left_leaf, leaf, left_parent);
+                        myres |= merge_leaves(tid, left_leaf, leaf, left_parent);
                 }
                 // case : the left leaf has extra data, so balance left with
                 // current
@@ -2467,9 +2628,9 @@ private:
                 {
                     if (left_parent == parent)
                         shift_right_leaf(
-                            left_leaf, leaf, left_parent, parentslot - 1);
+                            tid, left_leaf, leaf, left_parent, parentslot - 1);
                     else
-                        myres |= merge_leaves(leaf, right_leaf, right_parent);
+                        myres |= merge_leaves(tid, leaf, right_leaf, right_parent);
                 }
                 // case : both the leaf and right leaves have extra data and our
                 // parent, choose the leaf with more data
@@ -2477,19 +2638,19 @@ private:
                 {
                     if (left_leaf->get_slotuse() <= right_leaf->get_slotuse())
                         myres |= shift_left_leaf(
-                            leaf, right_leaf, right_parent, parentslot);
+                            tid, leaf, right_leaf, right_parent, parentslot);
                     else
                         shift_right_leaf(
-                            left_leaf, leaf, left_parent, parentslot - 1);
+                            tid, left_leaf, leaf, left_parent, parentslot - 1);
                 }
                 else
                 {
                     if (left_parent == parent)
                         shift_right_leaf(
-                            left_leaf, leaf, left_parent, parentslot - 1);
+                            tid, left_leaf, leaf, left_parent, parentslot - 1);
                     else
                         myres |= shift_left_leaf(
-                            leaf, right_leaf, right_parent, parentslot);
+                            tid, leaf, right_leaf, right_parent, parentslot);
                 }
             }
 
@@ -2555,7 +2716,9 @@ private:
                                     parentslot);
 
                     TLX_BTREE_ASSERT(parent->get_child(parentslot) == curr);
-                    parent->set_slotkey(parentslot, result.lastkey);
+                    auto parent_dup = static_cast<InnerNode*>(dup_prologue(tid, parent));
+                    parent_dup->set_slotkey(parentslot, result.lastkey);
+                    dup_epilogue(tid, parent, parent_dup);
                 }
                 else
                 {
@@ -2577,16 +2740,18 @@ private:
 
                 free_node(tid, inner->get_child(slot));
 
-                inner->copy_to_slotkey(
-                    inner->get_slotkey_vec() + slot, 
-                    inner->get_slotkey_vec() + inner->get_slotuse(),
-                    slot - 1);
-                inner->copy_to_childid(
-                    inner->get_childid_vec() + slot + 1,
-                    inner->get_childid_vec() + inner->get_slotuse() + 1,
-                    slot);
+                auto inner_dup = static_cast<InnerNode*>(dup_prologue(tid, inner));
+                inner_dup->copy_to_slotkey(
+                    inner_dup->get_slotkey_vec() + slot, 
+                    inner_dup->get_slotkey_vec() + inner_dup->get_slotuse(),
+                    inner_dup->get_slotkey_vec() + slot - 1);
+                inner_dup->copy_to_childid(
+                    inner_dup->get_childid_vec() + slot + 1,
+                    inner_dup->get_childid_vec() + inner_dup->get_slotuse() + 1,
+                    inner_dup->get_childid_vec() + slot);
 
-                inner->set_slotuse(inner->get_slotuse() - 1);
+                inner_dup->set_slotuse(inner_dup->get_slotuse() - 1);
+                dup_epilogue(tid, inner, inner_dup);
 
                 if (inner->get_level() == 1)
                 {
@@ -2594,7 +2759,9 @@ private:
                     slot--;
                     LeafNode* child =
                         static_cast<LeafNode*>(inner->get_child(slot));
-                    inner->set_slotkey(slot, child->key(child->get_slotuse() - 1));
+                    auto inner_dup = static_cast<InnerNode*>(dup_prologue(tid, inner));
+                    inner_dup->set_slotkey(slot, child->key(child->get_slotuse() - 1));
+                    dup_epilogue(tid, inner, inner_dup);
                 }
             }
 
@@ -2610,7 +2777,10 @@ private:
 
                     root_ = inner->get_child(0);
 
-                    inner->set_slotuse(0);
+                    auto inner_dup = static_cast<InnerNode*>(dup_prologue(tid, inner));
+                    inner_dup->set_slotuse(0);
+                    dup_epilogue(tid, inner, inner_dup);
+
                     free_node(tid, inner);
 
                     return btree_ok;
@@ -2623,10 +2793,10 @@ private:
                 {
                     if (left_parent == parent)
                         myres |= merge_inner(
-                            left_inner, inner, left_parent, parentslot - 1);
+                            tid, left_inner, inner, left_parent, parentslot - 1);
                     else
                         myres |= merge_inner(
-                            inner, right_inner, right_parent, parentslot);
+                            tid, inner, right_inner, right_parent, parentslot);
                 }
                 // case : the right leaf has extra data, so balance right with
                 // current
@@ -2635,10 +2805,10 @@ private:
                 {
                     if (right_parent == parent)
                         shift_left_inner(
-                            inner, right_inner, right_parent, parentslot);
+                            tid, inner, right_inner, right_parent, parentslot);
                     else
                         myres |= merge_inner(
-                            left_inner, inner, left_parent, parentslot - 1);
+                            tid, left_inner, inner, left_parent, parentslot - 1);
                 }
                 // case : the left leaf has extra data, so balance left with
                 // current
@@ -2647,10 +2817,10 @@ private:
                 {
                     if (left_parent == parent)
                         shift_right_inner(
-                            left_inner, inner, left_parent, parentslot - 1);
+                            tid, left_inner, inner, left_parent, parentslot - 1);
                     else
                         myres |= merge_inner(
-                            inner, right_inner, right_parent, parentslot);
+                            tid, inner, right_inner, right_parent, parentslot);
                 }
                 // case : both the leaf and right leaves have extra data and our
                 // parent, choose the leaf with more data
@@ -2658,19 +2828,19 @@ private:
                 {
                     if (left_inner->get_slotuse() <= right_inner->get_slotuse())
                         shift_left_inner(
-                            inner, right_inner, right_parent, parentslot);
+                            tid, inner, right_inner, right_parent, parentslot);
                     else
                         shift_right_inner(
-                            left_inner, inner, left_parent, parentslot - 1);
+                            tid, left_inner, inner, left_parent, parentslot - 1);
                 }
                 else
                 {
                     if (left_parent == parent)
                         shift_right_inner(
-                            left_inner, inner, left_parent, parentslot - 1);
+                            tid, left_inner, inner, left_parent, parentslot - 1);
                     else
                         shift_left_inner(
-                            inner, right_inner, right_parent, parentslot);
+                            tid, inner, right_inner, right_parent, parentslot);
                 }
             }
 
@@ -2728,7 +2898,7 @@ private:
             leaf->copy_to_slotdata(
                     leaf->get_slotdata_vec() + slot + 1, 
                     leaf->get_slotdata_vec() + leaf->get_slotuse(),
-                    slot);
+                    leaf->get_slotdata_vec() + slot);
 
             leaf->set_slotuse(leaf->get_slotuse() - 1);
 
@@ -2800,7 +2970,7 @@ private:
                 {
                     if (right_parent == parent) {
                         myres |= shift_left_leaf(
-                            leaf, right_leaf, right_parent, parentslot);
+                            tid, leaf, right_leaf, right_parent, parentslot);
                     }
                     else {
                         myres |= merge_leaves(left_leaf, leaf, left_parent);
@@ -2813,7 +2983,7 @@ private:
                 {
                     if (left_parent == parent) {
                         shift_right_leaf(
-                            left_leaf, leaf, left_parent, parentslot - 1);
+                            tid, left_leaf, leaf, left_parent, parentslot - 1);
                     }
                     else {
                         myres |= merge_leaves(leaf, right_leaf, right_parent);
@@ -2825,22 +2995,22 @@ private:
                 {
                     if (left_leaf->get_slotuse() <= right_leaf->get_slotuse()) {
                         myres |= shift_left_leaf(
-                            leaf, right_leaf, right_parent, parentslot);
+                            tid, leaf, right_leaf, right_parent, parentslot);
                     }
                     else {
                         shift_right_leaf(
-                            left_leaf, leaf, left_parent, parentslot - 1);
+                            tid, left_leaf, leaf, left_parent, parentslot - 1);
                     }
                 }
                 else
                 {
                     if (left_parent == parent) {
                         shift_right_leaf(
-                            left_leaf, leaf, left_parent, parentslot - 1);
+                            tid, left_leaf, leaf, left_parent, parentslot - 1);
                     }
                     else {
                         myres |= shift_left_leaf(
-                            leaf, right_leaf, right_parent, parentslot);
+                            tid, leaf, right_leaf, right_parent, parentslot);
                     }
                 }
             }
@@ -2946,11 +3116,11 @@ private:
                 inner->copy_to_slotkey(
                     inner->get_slotkey_vec() + slot, 
                     inner->get_slotkey_vec() + inner->get_slotuse(),
-                    slot - 1);
+                    inner->get_slotkey_vec() + slot - 1);
                 inner->copy_to_childid(
                     inner->get_childid_vec() + slot + 1,
                     inner->get_childid_vec() + inner->get_slotuse() + 1,
-                    slot);
+                    inner->get_childid_vec() + slot);
 
                 inner->set_slotuse(inner->get_slotuse() - 1);
 
@@ -3003,7 +3173,7 @@ private:
                 {
                     if (right_parent == parent) {
                         shift_left_inner(
-                            inner, right_inner, right_parent, parentslot);
+                            tid, inner, right_inner, right_parent, parentslot);
                     }
                     else {
                         myres |= merge_inner(
@@ -3030,7 +3200,7 @@ private:
                 {
                     if (left_inner->get_slotuse() <= right_inner->get_slotuse()) {
                         shift_left_inner(
-                            inner, right_inner, right_parent, parentslot);
+                            tid, inner, right_inner, right_parent, parentslot);
                     }
                     else {
                         shift_right_inner(
@@ -3045,7 +3215,7 @@ private:
                     }
                     else {
                         shift_left_inner(
-                            inner, right_inner, right_parent, parentslot);
+                            tid, inner, right_inner, right_parent, parentslot);
                     }
                 }
             }
@@ -3057,7 +3227,9 @@ private:
     //! Merge two leaf nodes. The function moves all key/data pairs from right
     //! to left and sets right's slotuse to zero. The right slot is then removed
     //! by the calling parent node.
-    result_t merge_leaves(LeafNode* left, LeafNode* right,
+    result_t merge_leaves(const int& tid, 
+                          LeafNode* left, 
+                          LeafNode* right,
                           InnerNode* parent) {
         TLX_BTREE_PRINT("Merge leaf nodes " << left << " and " << right <<
                         " with common parent " << parent << ".");
@@ -3068,20 +3240,25 @@ private:
 
         TLX_BTREE_ASSERT(left->get_slotuse() + right->get_slotuse() < leaf_slotmax);
 
-        left->copy_to_slotdata(
+        auto left_dup = static_cast<LeafNode*>(dup_prologue(tid, left));
+        left_dup->copy_to_slotdata(
                 right->get_slotdata_vec(), 
                 right->get_slotdata_vec() + right->get_slotuse(),
-                left->get_slotuse());
+                left_dup->get_slotdata_vec() + left_dup->get_slotuse());
 
-        left->set_slotuse(left->get_slotuse() + right->get_slotuse());
+        left_dup->set_slotuse(left_dup->get_slotuse() + right->get_slotuse());
+        dup_epilogue(tid, left, left_dup);
 
+        //TODO - iterator stuff
         left->next_leaf = right->next_leaf;
         if (left->next_leaf)
             left->next_leaf->prev_leaf = left;
         else
             tail_leaf_ = left;
 
-        right->set_slotuse(0);
+        auto right_dup = static_cast<LeafNode*>(dup_prologue(tid, right));
+        right_dup->set_slotuse(0);
+        dup_epilogue(tid, right, right_dup);
 
         return btree_fixmerge;
     }
@@ -3089,7 +3266,9 @@ private:
     //! Merge two inner nodes. The function moves all key/childid pairs from
     //! right to left and sets right's slotuse to zero. The right slot is then
     //! removed by the calling parent node.
-    static result_t merge_inner(InnerNode* left, InnerNode* right,
+    result_t merge_inner(const int& tid, 
+                                InnerNode* left, 
+                                InnerNode* right,
                                 InnerNode* parent, unsigned int parentslot) {
         TLX_BTREE_PRINT("Merge inner nodes " << left << " and " << right <<
                         " with common parent " << parent << ".");
@@ -3117,21 +3296,26 @@ private:
         }
 
         // retrieve the decision key from parent
-        left->set_slotkey(left->get_slotuse(), parent->get_slotkey(parentslot));
-        left->set_slotuse(left->get_slotuse() + 1);
+        auto left_dup = static_cast<InnerNode*>(dup_prologue(tid, left));
+        left_dup->set_slotkey(left_dup->get_slotuse(), parent->get_slotkey(parentslot));
+        left_dup->set_slotuse(left_dup->get_slotuse() + 1);
 
         // copy over keys and children from right
-        left->copy_to_slotkey(
+        left_dup->copy_to_slotkey(
                 right->get_slotkey_vec(),
                 right->get_slotkey_vec() + right->get_slotuse(),
-                left->get_slotuse());
-        left->copy_to_childid(
+                left_dup->get_slotkey_vec() + left_dup->get_slotuse());
+        left_dup->copy_to_childid(
                 right->get_childid_vec(), 
                 right->get_childid_vec() + right->get_slotuse() + 1,
-                left->get_slotuse());
+                left_dup->get_childid_vec() + left_dup->get_slotuse());
 
-        left->set_slotuse(left->get_slotuse() + right->get_slotuse());
-        right->set_slotuse(0);
+        left_dup->set_slotuse(left_dup->get_slotuse() + right->get_slotuse());
+        dup_epilogue(tid, left, left_dup);
+
+        auto right_dup = static_cast<InnerNode*>(dup_prologue(tid, right));
+        right_dup->set_slotuse(0);
+        dup_epilogue(tid, right, right_dup);
 
         return btree_fixmerge;
     }
@@ -3139,8 +3323,8 @@ private:
     //! Balance two leaf nodes. The function moves key/data pairs from right to
     //! left so that both nodes are equally filled. The parent node is updated
     //! if possible.
-    static result_t shift_left_leaf(
-        LeafNode* left, LeafNode* right,
+    result_t shift_left_leaf(
+        const int& tid, LeafNode* left, LeafNode* right,
         InnerNode* parent, unsigned int parentslot) {
 
         TLX_BTREE_ASSERT(left->is_leafnode() && right->is_leafnode());
@@ -3162,26 +3346,30 @@ private:
 
         // copy the first items from the right node to the last slot in the left
         // node.
-
-        left->copy_to_slotdata(
+        auto left_dup = static_cast<LeafNode*>(dup_prologue(tid, left));
+        left_dup->copy_to_slotdata(
                 right->get_slotdata_vec(), 
                 right->get_slotdata_vec() + shiftnum,
-                left->get_slotuse());
+                left_dup->get_slotdata_vec() + left_dup->get_slotuse());
 
-        left->set_slotuse(left->get_slotuse() + shiftnum);
+        left_dup->set_slotuse(left_dup->get_slotuse() + shiftnum);
+        dup_epilogue(tid, left, left_dup);
 
         // shift all slots in the right node to the left
+        auto right_dup = static_cast<LeafNode*>(dup_prologue(tid, right));
+        right_dup->copy_to_slotdata(
+                right_dup->get_slotdata_vec() + shiftnum, 
+                right_dup->get_slotdata_vec() + right_dup->get_slotuse(),
+                right_dup->get_slotdata_vec());
 
-        right->copy_to_slotdata(
-                right->get_slotdata_vec() + shiftnum, 
-                right->get_slotdata_vec() + right->get_slotuse(),
-                0);
-
-        left->set_slotuse(left->get_slotuse() - shiftnum);
+        right_dup->set_slotuse(right_dup->get_slotuse() - shiftnum);
+        dup_epilogue(tid, right, right_dup);
 
         // fixup parent
         if (parentslot < parent->get_slotuse()) {
-            parent->set_slotkey(parentslot, left->key(left->get_slotuse() - 1));
+            auto parent_dup = static_cast<InnerNode*>(dup_prologue(tid, parent));
+            parent_dup->set_slotkey(parentslot, left->key(left->get_slotuse() - 1));
+            dup_epilogue(tid, parent, parent_dup);
             return btree_ok;
         }
         else {  // the update is further up the tree
@@ -3192,8 +3380,9 @@ private:
     //! Balance two inner nodes. The function moves key/data pairs from right to
     //! left so that both nodes are equally filled. The parent node is updated
     //! if possible.
-    static void shift_left_inner(InnerNode* left, InnerNode* right,
-                                 InnerNode* parent, unsigned int parentslot) {
+    void shift_left_inner(
+                const int& tid, InnerNode* left, InnerNode* right,
+                InnerNode* parent, unsigned int parentslot) {
         TLX_BTREE_ASSERT(left->get_level() == right->get_level());
         TLX_BTREE_ASSERT(parent->get_level() == left->get_level() + 1);
 
@@ -3228,43 +3417,50 @@ private:
 
         // copy the parent's decision slotkey and childid to the first new key
         // on the left
-        left->set_slotkey(left->get_slotuse(), parent->get_slotkey(parentslot));
-        left->set_slotuse(left->get_slotuse() + 1);
+        auto left_dup = static_cast<InnerNode*>(dup_prologue(tid, left));
+        left_dup->set_slotkey(left_dup->get_slotuse(), parent->get_slotkey(parentslot));
+        left_dup->set_slotuse(left_dup->get_slotuse() + 1);
 
         // copy the other items from the right node to the last slots in the
         // left node.
-        left->copy_to_slotkey(
+        left_dup->copy_to_slotkey(
                 right->get_slotkey_vec(), 
                 right->get_slotkey_vec() + shiftnum - 1,
-                left->get_slotuse());
-        left->copy_to_childid(
+                left_dup->get_slotkey_vec() + left_dup->get_slotuse());
+        left_dup->copy_to_childid(
                 right->get_childid_vec(), 
                 right->get_childid_vec() + shiftnum,
-                left->get_slotuse());
+                left_dup->get_childid_vec() + left_dup->get_slotuse());
 
-        left->set_slotuse(left->get_slotuse() + (shiftnum - 1));
+        left_dup->set_slotuse(left_dup->get_slotuse() + (shiftnum - 1));
+        dup_epilogue(tid, left, left_dup);
 
         // fixup parent
-        parent->set_slotkey(parentslot, right->get_slotkey(shiftnum - 1));
+        auto parent_dup = static_cast<InnerNode*>(dup_prologue(tid, parent));
+        parent_dup->set_slotkey(parentslot, right->get_slotkey(shiftnum - 1));
+        dup_epilogue(tid, parent, parent_dup);
 
         // shift all slots in the right node
-        right->copy_to_slotkey(
-            right->get_slotkey_vec() + shiftnum, 
-            right->get_slotkey_vec() + right->get_slotuse(),
-            0);
-        right->copy_to_childid(
-            right->get_childid_vec() + shiftnum, 
-            right->get_childid_vec() + right->get_slotuse() + 1,
-            0);
+        auto right_dup = static_cast<InnerNode*>(dup_prologue(tid, right));
+        right_dup->copy_to_slotkey(
+            right_dup->get_slotkey_vec() + shiftnum, 
+            right_dup->get_slotkey_vec() + right_dup->get_slotuse(),
+            right_dup->get_slotkey_vec());
+        right_dup->copy_to_childid(
+            right_dup->get_childid_vec() + shiftnum, 
+            right_dup->get_childid_vec() + right_dup->get_slotuse() + 1,
+            right_dup->get_childid_vec());
 
-        left->set_slotuse(left->get_slotuse() - shiftnum);
+        right_dup->set_slotuse(right_dup->get_slotuse() - shiftnum);
+        dup_epilogue(tid, right, right_dup);
     }
 
     //! Balance two leaf nodes. The function moves key/data pairs from left to
     //! right so that both nodes are equally filled. The parent node is updated
     //! if possible.
-    static void shift_right_leaf(LeafNode* left, LeafNode* right,
-                                 InnerNode* parent, unsigned int parentslot) {
+    void shift_right_leaf(
+                const int& tid, LeafNode* left, LeafNode* right,
+                InnerNode* parent, unsigned int parentslot) {
         TLX_BTREE_ASSERT(left->is_leafnode() && right->is_leafnode());
         TLX_BTREE_ASSERT(parent->get_level() == 1);
 
@@ -3300,29 +3496,37 @@ private:
 
         TLX_BTREE_ASSERT(right->get_slotuse() + shiftnum < leaf_slotmax);
 
-        right->copy_backward_to_slotdata(
-                right->get_slotdata_vec(), 
-                right->get_slotdata_vec() + right->get_slotuse(),
-                right->get_slotuse() + shiftnum);
+        auto right_dup = static_cast<LeafNode*>(dup_prologue(tid, right));
+        right_dup->copy_backward_to_slotdata(
+                right_dup->get_slotdata_vec(), 
+                right_dup->get_slotdata_vec() + right_dup->get_slotuse(),
+                right_dup->get_slotdata_vec() + right_dup->get_slotuse() + shiftnum);
 
-        right->set_slotuse(right->get_slotuse() + shiftnum);
+        right_dup->set_slotuse(right_dup->get_slotuse() + shiftnum);
 
         // copy the last items from the left node to the first slot in the right
         // node.
-        right->copy_to_slotdata(
+        right_dup->copy_to_slotdata(
                 left->get_slotdata_vec() + left->get_slotuse() - shiftnum,
-                left->get_slotdata_vec() + left->get_slotuse(), 0);
+                left->get_slotdata_vec() + left->get_slotuse(), 
+                right_dup->get_slotdata_vec());
+        dup_epilogue(tid, right, right_dup);
 
-        left->set_slotuse(left->get_slotuse() - shiftnum);
+        auto left_dup = static_cast<LeafNode*>(dup_prologue(tid, left));
+        left_dup->set_slotuse(left_dup->get_slotuse() - shiftnum);
+        dup_epilogue(tid, left, left_dup);
 
-        parent->set_slotkey(parentslot, left->key(left->get_slotuse() - 1));
+        auto parent_dup = static_cast<InnerNode*>(dup_prologue(tid, parent));
+        parent_dup->set_slotkey(parentslot, left->key(left->get_slotuse() - 1));
+        dup_epilogue(tid, parent, parent_dup);
     }
 
     //! Balance two inner nodes. The function moves key/data pairs from left to
     //! right so that both nodes are equally filled. The parent node is updated
     //! if possible.
-    static void shift_right_inner(InnerNode* left, InnerNode* right,
-                                  InnerNode* parent, unsigned int parentslot) {
+    void shift_right_inner(
+                const int& tid, InnerNode* left, InnerNode* right,
+                InnerNode* parent, unsigned int parentslot) {
         TLX_BTREE_ASSERT(left->get_level() == right->get_level());
         TLX_BTREE_ASSERT(parent->get_level() == left->get_level() + 1);
 
@@ -3355,35 +3559,43 @@ private:
 
         TLX_BTREE_ASSERT(right->get_slotuse() + shiftnum < inner_slotmax);
 
-        right->copy_backward_to_slotkey(
-            right->get_slotkey_vec(), 
-            right->get_slotkey_vec() + right->get_slotuse(),
-            right->get_slotuse() + shiftnum);
-        right->copy_backward_to_childid(
-            right->get_childid_vec(), 
-            right->get_childid_vec() + right->get_slotuse() + 1,
-            right->get_slotuse() + 1 + shiftnum);
+        auto right_dup = static_cast<InnerNode*>(dup_prologue(tid, right));
+        right_dup->copy_backward_to_slotkey(
+            right_dup->get_slotkey_vec(), 
+            right_dup->get_slotkey_vec() + right_dup->get_slotuse(),
+            right_dup->get_slotkey_vec() + right_dup->get_slotuse() + shiftnum);
+        right_dup->copy_backward_to_childid(
+            right_dup->get_childid_vec(), 
+            right_dup->get_childid_vec() + right_dup->get_slotuse() + 1,
+            right_dup->get_childid_vec() + right_dup->get_slotuse() + 1 + shiftnum);
 
-        right->set_slotuse(right->get_slotuse() + shiftnum);
+        right_dup->set_slotuse(right_dup->get_slotuse() + shiftnum);
 
         // copy the parent's decision slotkey and childid to the last new key on
         // the right
-        right->set_slotkey(shiftnum - 1, parent->get_slotkey(parentslot));
+        right_dup->set_slotkey(shiftnum - 1, parent->get_slotkey(parentslot));
 
         // copy the remaining last items from the left node to the first slot in
         // the right node.
-        right->copy_to_slotkey(
+        right_dup->copy_to_slotkey(
                 left->get_slotkey_vec() + left->get_slotuse() - shiftnum + 1,
-                left->get_slotkey_vec() + left->get_slotuse(), 0);
-        right->copy_to_childid(
+                left->get_slotkey_vec() + left->get_slotuse(), 
+                right_dup->get_slotkey_vec());
+        right_dup->copy_to_childid(
                 left->get_childid_vec() + left->get_slotuse() - shiftnum + 1,
-                left->get_childid_vec() + left->get_slotuse() + 1, 0);
+                left->get_childid_vec() + left->get_slotuse() + 1, 
+                right_dup->get_childid_vec());
+        dup_epilogue(tid, right, right_dup);
 
         // copy the first to-be-removed key from the left node to the parent's
         // decision slot
-        parent->set_slotkey(parentslot, left->get_slotkey(left->get_slotuse() - shiftnum));
+        auto parent_dup = static_cast<InnerNode*>(dup_prologue(tid, parent));
+        parent_dup->set_slotkey(parentslot, left->get_slotkey(parent->get_slotuse() - shiftnum));
+        dup_epilogue(tid, parent, parent_dup);
 
-        left->set_slotuse(left->get_slotuse() - shiftnum);
+        auto left_dup = static_cast<InnerNode*>(dup_prologue(tid, left));
+        left_dup->set_slotuse(left_dup->get_slotuse() - shiftnum);
+        dup_epilogue(tid, left, left_dup);
     }
 
     //! \}

@@ -20,7 +20,7 @@
 #include <iostream>
 
 #define RECORD_MANAGER_T record_manager<Reclaim, Alloc, Pool, tlx::inner_node<K, std::pair<K,V>>, tlx::leaf_node<K, std::pair<K,V>>>
-#define DATA_STRUCTURE_T btree_ser<K, V, RECORD_MANAGER_T>
+#define DATA_STRUCTURE_T btree_dup<K, V, RECORD_MANAGER_T>
 
 template <typename K, typename V, class Reclaim = reclaimer_debra<K>, class Alloc = allocator_new<K>, class Pool = pool_none<K>>
 class ds_adapter {

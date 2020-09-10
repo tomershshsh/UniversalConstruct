@@ -43,7 +43,7 @@ public:
 	inline void set_del() { flags |= DEL_MASK; }
 	
 	static bool lock_duplications();
-	static void unlock_duplications();
+	static void unlock_duplications(bool all);
 
 	skey_t get_key();
 	sval_t get_value();
@@ -79,7 +79,7 @@ thread_local std::vector<Node*>* path = nullptr;
 #define path path<skey_t, sval_t>
 
 template <typename skey_t, typename sval_t>
-thread_local std::vector<Node*>* locked = nullptr;
+thread_local std::vector<std::pair<Node*, bool>>* locked = nullptr;
 #define locked locked<skey_t, sval_t>
 
 thread_local bool in_writing_function = false;
@@ -109,7 +109,7 @@ bool Node::open(Node*& root)
 	if (locked)
 		locked->clear();
 	else
-		locked = new std::vector<Node*>();
+		locked = new std::vector<std::pair<Node*, bool>>();
 
 	orig_root = root;
 	new_root = nullptr;
@@ -121,36 +121,16 @@ bool Node::open(Node*& root)
 template <typename skey_t, typename sval_t>
 bool Node::lock_duplications()
 {
-	// for (auto& d : *duplications)
-	// {
-	// 	auto orig = d.orig;
-	// 	auto orig_parent = d.orig_parent;
-	// 	if (orig_parent == nullptr)
-	// 		continue;
-
-	// 	if (!pthread_spin_trylock(&orig_parent->dup_lock))
-	// 	{
-	// 		locked->push_back(orig_parent);
-	// 		if (!pthread_spin_trylock(&orig->dup_lock))
-	// 		{
-	// 			locked->push_back(orig);
-	// 			continue;
-	// 		}	
-	// 	}
-		
-	// 	unlock_duplications();
-	// 	return false;
-	// }
-
 	return true;
 }
 
 template<typename skey_t, typename sval_t>
-void Node::unlock_duplications()
+void Node::unlock_duplications(bool all)
 {
 	for (auto& l : *locked)
 	{
-		pthread_spin_unlock(&l->dup_lock);
+		if (all || l.second)
+			pthread_spin_unlock(&l.first->dup_lock);
 	}
 }
 
@@ -172,8 +152,8 @@ bool Node::close(Node*& root)
 		auto orig_idx = d.orig_idx;
 
 		if (orig_parent != nullptr && orig_parent->children[orig_idx] != orig) {
-			unlock_duplications();
-			pthread_spin_unlock(&orig->dup_lock);
+			unlock_duplications(true);
+			// pthread_spin_unlock(&orig->dup_lock);
 			return false;
 		}
 	}
@@ -196,8 +176,8 @@ bool Node::close(Node*& root)
 					__ATOMIC_RELAXED, 
 					__ATOMIC_RELAXED))
 			{
-				unlock_duplications();
-				pthread_spin_unlock(&orig->dup_lock);
+				unlock_duplications(true);
+				// pthread_spin_unlock(&orig->dup_lock);
 				return false;
 			}
 		}
@@ -211,14 +191,14 @@ bool Node::close(Node*& root)
 					__ATOMIC_RELAXED, 
 					__ATOMIC_RELAXED))
 			{
-				unlock_duplications();
-				pthread_spin_unlock(&orig->dup_lock);
+				unlock_duplications(true);
+				// pthread_spin_unlock(&orig->dup_lock);
 				return false;
 			}
 		}
 	}
 
-	unlock_duplications();
+	unlock_duplications(false);
 	return true;
 }
 

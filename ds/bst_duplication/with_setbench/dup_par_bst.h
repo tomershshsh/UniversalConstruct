@@ -25,7 +25,7 @@ private:
 
 	void make_empty(Node* t);
 
-	Node* find(const skey_t& key, Node*& parent, Node*& gparent);
+	Node* find(const skey_t& key, Node*& parent);
 
 	Node* create_node(const int& tid, const skey_t& key, const sval_t& value, unsigned int max_num_children);
 
@@ -79,13 +79,12 @@ void bst::make_empty(Node* t) {
 }
 
 template <typename skey_t, typename sval_t, class RecMgr>
-Node* bst::find(const skey_t& key, Node*& parent, Node*& gparent)
+Node* bst::find(const skey_t& key, Node*& parent)
 {
 	auto curr = root;
 
 	while (curr != nullptr && (curr->key != key || curr->is_del()))
 	{
-		gparent = parent;
 		parent = curr;
 		curr = (key < curr->key) ? curr->get_child(LEFT) : curr->get_child(RIGHT);
 	}
@@ -120,18 +119,16 @@ Node* bst::create_node(const int& tid, const Node& node)
 template <typename skey_t, typename sval_t, class RecMgr>
 Node* bst::dup_prologue(const int& tid, Node* orig)
 {
-	// if (!pthread_spin_trylock(&orig->dup_lock))
-	// {
-	// 	locked->push_back(orig);
-	// 	return create_node(tid, *orig);
-	// }
-	// else
-	// {
-	// 	locking_res = false;
-	// 	return nullptr;
-	// }
-
-	return create_node(tid, *orig);
+	if (!pthread_spin_trylock(&orig->dup_lock))
+	{
+		locked->push_back(std::make_pair(orig, false));
+		return create_node(tid, *orig);
+	}
+	else
+	{
+		locking_res = false;
+		return nullptr;
+	}
 }
 
 template <typename skey_t, typename sval_t, class RecMgr>
@@ -164,17 +161,20 @@ Node* bst::dup_epilogue(const int& tid, Node* orig, Node* dup)
 	}
 
 FOUND:
-	// if (parent != nullptr)
-	// {
-	// 	if (!pthread_spin_trylock(&parent->dup_lock))
-	// 		locked->push_back(parent);
-	// 	else
-	// 	{
-	// 		Node::unlock_duplications();
-	// 		locking_res = false;
-	// 		return nullptr;
-	// 	}
-	// }
+	/* lock parent (orig is already locked in dup_prologue) */
+	if (parent != nullptr)
+	{
+		if (!pthread_spin_trylock(&parent->dup_lock))
+		{
+			locked->push_back(std::make_pair(parent, true));
+		}
+		else
+		{
+			Node::unlock_duplications(true);
+			locking_res = false;
+			return nullptr;
+		}
+	}
 
 	/* update if there is another duplication in the neighborhood */
 	for (auto& d : *duplications)
@@ -273,43 +273,11 @@ sval_t bst::insert(const int tid, const skey_t& key, const sval_t& value)
 	}
 
 	/* regular insertion */
-	
-	Node* gparent = nullptr;
 	Node* parent = nullptr;
-	{
-		// std::lock_guard<std::mutex> lock(g_mutex);
-		auto found = find(key, parent, gparent);
+	auto found = find(key, parent);
 
-		if (found != nullptr || parent == nullptr)
-			return value;
-
-		if (!pthread_spin_trylock(&parent->dup_lock))
-		{
-			// locked->push_back(parent);
-			if (gparent != nullptr)
-			{
-				if (!pthread_spin_trylock(&gparent->dup_lock))
-				{
-					locked->push_back(gparent);
-				}
-				else
-				{
-					// Node::unlock_duplications();
-					pthread_spin_unlock(&parent->dup_lock);
-					locking_res = false;
-					return value;
-				}
-			}
-		}
-		else
-		{
-			locking_res = false;
-			return value;
-		}
-	}
-
-
-
+	if (found != nullptr || parent == nullptr)
+		return value;
 
 	if (key < parent->get_key())
 	{
@@ -366,9 +334,8 @@ sval_t bst::insert_wrapper(const int tid, const skey_t& key, const sval_t& value
 template <typename skey_t, typename sval_t, class RecMgr>
 sval_t bst::remove(const int tid, const skey_t& key)
 {
-	Node* gparent = nullptr;
 	Node* parent = nullptr;
-	auto found = find(key, parent, gparent);
+	auto found = find(key, parent);
 
 	if (found == nullptr)
 		return NO_VALUE;
