@@ -105,11 +105,12 @@ public:
         public:
             ChildIterator(NodePtrType _node) {
                 node = _node;
-                for (int i = 0; i <= node->slotuse; i++)
-                    child_slots[i] = true;
+                if (node)
+                    for (int i = 0; i <= node->slotuse; i++)
+                        child_slots[i] = true;
             }
             bool hasNext() {
-                if (node->is_leafnode())
+                if (!node || node->is_leafnode())
                     return false;
 
                 bool res = false;
@@ -119,7 +120,7 @@ public:
                 return res;
             }
             NodePtrType next() {
-                if (node->is_leafnode())
+                if (!node || node->is_leafnode())
                     setbench_error("ERROR: it is suspected that you are calling ChildIterator::next() without first verifying that it hasNext()");
                 
                 struct DATA_STRUCTURE_T::btree_impl::InnerNode* in = 
@@ -137,20 +138,20 @@ public:
         };
         
         bool isLeaf(NodePtrType node) {
-            return node->is_leafnode();
+            return (node && node->is_leafnode());
         }
         size_t getNumChildren(NodePtrType node) {
-            if (isLeaf(node)) return 0;
+            if (!node || isLeaf(node)) return 0;
             return node->slotuse + 1;
         }
         size_t getNumKeys(NodePtrType node) {
-            if (!node->is_leafnode()) return 0;
+            if (!node || !node->is_leafnode()) return 0;
             return node->slotuse;
         }
         size_t getSumOfKeys(NodePtrType node) {
             int sum_keys = 0;
 
-            if (node->is_leafnode()) {
+            if (node && node->is_leafnode()) {
                 struct DATA_STRUCTURE_T::btree_impl::LeafNode* ln = 
                     static_cast<struct DATA_STRUCTURE_T::btree_impl::LeafNode*>(node);
                 for (int i = 0; i < node->slotuse; i++) {
@@ -162,7 +163,12 @@ public:
         ChildIterator getChildIterator(NodePtrType node) {
             return ChildIterator(node);
         }
-        static size_t getSizeInBytes(NodePtrType node) { return sizeof(*node); }
+        static size_t getSizeInBytes(NodePtrType node) { 
+            if (node)
+                return sizeof(*node); 
+            else
+                return 0;
+        }
     };
 
     TreeStats<NodeHandler> * createTreeStats(const K& _minKey, const K& _maxKey) {

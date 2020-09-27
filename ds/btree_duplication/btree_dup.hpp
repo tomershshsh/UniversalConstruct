@@ -238,24 +238,15 @@ public:
     //! already present.
     sval_t insert(const int tid, const skey_t& key, const sval_t& value) 
     {
-        // std::lock_guard<std::mutex> lck(tlx::g_mutex);
         unsigned int counter = 0;
         while (1)
         {            
             auto guard = tree_.recmgr->getGuard(tid);
-            // tlx::last_log_4[tid] = tlx::last_log_3[tid];
-            // tlx::last_log_3[tid] = tlx::last_log_2[tid];
-            // tlx::last_log_2[tid] = tlx::last_log[tid];
-            // tlx::last_log[tid] = tlx::current_log[tid];
-            // tlx::current_log[tid] = tlx::my_tlog[tid].str();
-            // tlx::my_tlog[tid].str("");
-
-            tlx::dup_open<key_type, value_type>(tid, tree_.root_);
+            tlx::dup_open<key_type, value_type>(tid, &tree_.root_);
             tlx::locking_res = true;
-
             auto insertion_res = tree_.insert(tid, std::make_pair(key, value));
 
-            if (tlx::locking_res && tlx::dup_close<key_type, value_type>(tid, tree_.root_))
+            if (tlx::locking_res && tlx::dup_close<key_type, value_type>(tid, &tree_.root_))
             {
                 for (auto& d : *tlx::duplications)
                 {
@@ -297,24 +288,15 @@ public:
     //! unique-associative map there is no difference to erase().
     sval_t erase(const int tid, const skey_t& key) 
     {
-        // std::lock_guard<std::mutex> lck(tlx::g_mutex);
         unsigned int counter = 0;
         while (1)
         {
             auto guard = tree_.recmgr->getGuard(tid);
-            // tlx::last_log_4[tid] = tlx::last_log_3[tid];
-            // tlx::last_log_3[tid] = tlx::last_log_2[tid];
-            // tlx::last_log_2[tid] = tlx::last_log[tid];
-            // tlx::last_log[tid] = tlx::current_log[tid];
-            // tlx::current_log[tid] = tlx::my_tlog[tid].str();
-            // tlx::my_tlog[tid].str("");
-
-            tlx::dup_open<key_type, value_type>(tid, tree_.root_);
+            tlx::dup_open<key_type, value_type>(tid, &tree_.root_);
             tlx::locking_res = true;
-
             auto removal_res = tree_.erase_one(tid, key);
 
-            if (tlx::locking_res && tlx::dup_close<key_type, value_type>(tid, tree_.root_))
+            if (tlx::locking_res && tlx::dup_close<key_type, value_type>(tid, &tree_.root_))
             {
                 for (auto& d : *tlx::duplications)
                 {

@@ -1077,7 +1077,6 @@ private:
         LeafNode* n = (LeafNode*)recmgr->template allocate<LeafNode>(tid);
         std::memcpy((void *)n, (void *)other, sizeof(LeafNode));
         pthread_spin_init(&n->dup_lock, PTHREAD_PROCESS_PRIVATE);
-        // my_tlog[tid] << "duplicated leaf - " << n << " out of - " << other << "\n";
         return n;
     }
 
@@ -1093,14 +1092,6 @@ private:
         InnerNode* n = (InnerNode*)recmgr->template allocate<InnerNode>(tid);
         std::memcpy((void *)n, (void *)other, sizeof(InnerNode));
         pthread_spin_init(&n->dup_lock, PTHREAD_PROCESS_PRIVATE);
-        // my_tlog[tid] << "duplicated inner - " << n << " out of - " << other << "\n";
-        // my_tlog[tid] << n << "'s children when created are: ";
-        // InnerNode * i_n = static_cast<InnerNode*>(n);
-        // for (int i; i <= i_n->slotuse; i++)
-        // {
-        //     my_tlog[tid] << i_n->childid[i] << ", ";
-        // }
-        // my_tlog[tid] << "\n";
         return n;
     }
 
@@ -1144,36 +1135,6 @@ public:
     //! 
     //! \{
 
-    bool check_tree(node * n)
-    {
-        bool result = true;
-        if (n->is_leafnode())
-        {
-            if (is_locked(n)) {
-                std::cout << "check_tree: leaf - " << n << " - " << n->is_del() << std::endl;
-                return false;
-            }
-        }
-        else
-        {
-            InnerNode * in = static_cast<InnerNode *>(n);
-            if (is_locked(n)) {
-                std::cout << "check_tree: inner - " << in << std::endl;
-                result = false;
-            }
-            for (int i = 0; i <= n->slotuse; i++)
-            {
-                if (!check_tree(in->childid[i]))
-                {
-                    std::cout << "check_tree: \tparent - " << in << std::endl;
-                    result = false;
-                }
-            }
-        }
-
-        return result;
-    }
-
     node * dup_prologue(const int& tid, node * orig) 
     {
         if (locking_res == false)
@@ -1206,28 +1167,13 @@ public:
             if (!pthread_spin_trylock(&parent->dup_lock))
             {
                 locked->insert(std::make_pair(parent, true));
-                // my_tlog[tid] << "lock parent - " << parent << "\n";
-                // my_tlog[tid] << parent << "'s children when locked are: ";
-                // InnerNode * i_parent = static_cast<InnerNode*>(parent);
-                // for (int i; i <= i_parent->slotuse; i++)
-                // {
-                //     my_tlog[tid] << i_parent->childid[i] << ", ";
-                // }
-                // my_tlog[tid] << "\n";
             }
             else
             {
-                // my_tlog[tid] << "failed to lock parent - " << parent << "\n";
                 dup_unlock_duplications<Key, Value>(tid, true);
                 locking_res = false;
                 return nullptr;
             }
-            // if (!is_locked(parent))
-            // {
-            //     // my_tlog[tid] << "WTFFFFFFFF 1 - " << parent << " is not locked\n";
-            //     // std::cout << "WTFFFFFFFF 1 - " << parent << " is not locked\n";
-            //     exit(-1);
-            // }
         }
 
         /* lock orig */
@@ -1236,42 +1182,17 @@ public:
             if (!pthread_spin_trylock(&orig->dup_lock))
             {
                 locked->insert(std::make_pair(orig, false));
-                // my_tlog[tid] << "lock orig - " << orig << "\n";
-                // if (!orig->is_leafnode())
-                // {
-                //     my_tlog[tid] << orig << "'s children when locked are: ";
-                //     InnerNode * i_orig = static_cast<InnerNode*>(orig);
-                //     for (int i; i <= i_orig->slotuse; i++)
-                //     {
-                //         my_tlog[tid] << i_orig->childid[i] << ", ";
-                //     }
-                //     my_tlog[tid] << "\n";
-                // }
             }
             else
             {
-                // my_tlog[tid] << "failed to lock orig - " << orig << "\n";
                 dup_unlock_duplications<Key, Value>(tid, true);
                 locking_res = false;
                 return nullptr;
             }
-            // if (!is_locked(orig))
-            // {
-            //     // my_tlog[tid] << "WTFFFFFFFF 2 - " << orig << " is not locked\n";
-            //     // std::cout << "WTFFFFFFFF 2 - " << parent << " is not locked\n";
-            //     exit(-1);
-            // }
         }
         else if (orig != nullptr)
         {
             (*locked)[orig] = false;
-            my_tlog[tid] << "lock orig (that is also parent) - " << orig << "\n";
-            // if (!is_locked(orig))
-            // {
-            //     // my_tlog[tid] << "WTFFFFFFFF 3 - " << orig << " is not locked\n";
-            //     // std::cout << "WTFFFFFFFF 1 - " << parent << " is not locked\n";
-            //     exit(-1);
-            // }
         }        
 
         if (orig->is_leafnode())
@@ -1317,7 +1238,6 @@ public:
                     if (i_dup->childid[idx] == orig)
                     {
                         i_dup->childid[idx] = dup;
-                        // my_tlog[tid] << "dup " << i_dup << "->childid[" << idx << "] replaced from " << orig << " to " << dup << "\n";
                     }
                 }
                 continue;
@@ -1331,7 +1251,6 @@ public:
                     if (i_dup->childid[idx] == d.first)
                     {
                         i_dup->childid[idx] = d.second.dup;
-                        // my_tlog[tid] << "dup " << i_dup << "->childid[" << idx << "] replaced from " << d.first << " to " << d.second.dup << "\n";
                     }
                 }
             }
@@ -1340,7 +1259,6 @@ public:
         if (do_insert)
         {
             duplications->insert({orig, {dup, parent, child_idx}});
-            // my_tlog[tid] << "insert to duplications. orig=" << orig << " dup=" << dup << " parent=" << parent << "\n";
         }
 
         dup_happened = true;
@@ -1943,9 +1861,6 @@ private:
     //! Returns true if the item was inserted
     std::pair<iterator, bool>
     insert_start(const int& tid, const key_type& key, const value_type& value) {
-        // std::lock_guard<std::mutex> lck(g_mutex);
-        // tlx::bug_log[tid].append(std::to_string(key));
-        // tlx::bug_log[tid].append("[");
         node* newchild = nullptr;
         key_type newkey = key_type();
 
@@ -1997,7 +1912,6 @@ private:
             verify();
             TLX_BTREE_ASSERT(exists(key));
         }
-        // tlx::bug_log[tid].append("], ");
         return r;
     }
 
@@ -2027,7 +1941,6 @@ private:
             std::pair<iterator, bool> r =
                 insert_descend(tid, inner->get_child(slot),
                                key, value, &newkey, &newchild);
-            // if (locking_res == false) {tlx::bug_log[tid].append("A"); return r;}
 
             if (newchild)
             {
@@ -2038,7 +1951,6 @@ private:
                 if (inner->is_full())
                 {
                     split_inner_node(tid, inner, splitkey, splitnode, slot);
-                    if (locking_res == false) {tlx::bug_log[tid].append("B"); return r;}
 
                     TLX_BTREE_PRINT("BTree::insert_descend done split_inner:" <<
                                     " putslot: " << slot <<
@@ -2077,7 +1989,6 @@ private:
                             inner_dup->set_slotuse(inner_dup->get_slotuse() + 1);
                             dup_epilogue(tid, inner, inner_dup);
                         }
-                        // if (locking_res == false) {tlx::bug_log[tid].append("C"); return r;}
 
                         // set new split key and move corresponding datum into
                         // right node
@@ -2086,7 +1997,6 @@ private:
                             split_dup->set_child(0, newchild);
                             dup_epilogue(tid, split, split_dup);
                         }
-                        // if (locking_res == false) {tlx::bug_log[tid].append("D"); return r;}
 
                         *splitkey = newkey;
 
@@ -2124,7 +2034,6 @@ private:
                     inner_dup->set_slotuse(inner_dup->get_slotuse() + 1);
                     dup_epilogue(tid, inner, inner_dup);
                 }
-                // if (locking_res == false) {tlx::bug_log[tid].append("E"); return r;}
             }
 
             return r;
@@ -2144,7 +2053,6 @@ private:
             if (leaf->is_full())
             {
                 split_leaf_node(tid, leaf, splitkey, splitnode);
-                // if (locking_res == false) {tlx::bug_log[tid].append("F"); return std::pair<iterator, bool>(iterator(leaf, slot), false);}
 
                 // check if insert slot is in the split sibling node
                 if (slot >= leaf->get_slotuse())
@@ -2168,8 +2076,7 @@ private:
                 leaf_dup->set_slotuse(leaf_dup->get_slotuse() + 1);
                 dup_epilogue(tid, leaf, leaf_dup);
             }
-            // if (locking_res == false) {tlx::bug_log[tid].append("G"); return std::pair<iterator, bool>(iterator(leaf, slot), false);}
-
+            
             if (splitnode && leaf != *splitnode && slot == leaf->get_slotuse() - 1)
             {
                 // special case: the node was split, and the insert is at the
@@ -2505,9 +2412,6 @@ public:
     bool erase_one(const int& tid, const key_type& key) {
         TLX_BTREE_PRINT("BTree::erase_one(" << key <<
                         ") on btree size " << size());
-        // std::lock_guard<std::mutex> lck(g_mutex);
-        // tlx::bug_log[tid].append(std::to_string(key));
-        // tlx::bug_log[tid].append("(");
         if (self_verify) verify();
 
         if (!orig_root) return false;
@@ -2523,7 +2427,6 @@ public:
 #endif
         if (self_verify) verify();
         
-        // tlx::bug_log[tid].append("), ");
         return !result.has(btree_not_found);
     }
 
@@ -2620,7 +2523,6 @@ private:
                 leaf_dup->set_slotuse(leaf_dup->get_slotuse() - 1);
                 dup_epilogue(tid, leaf, leaf_dup);
             }
-            // if (locking_res == false) {tlx::bug_log[tid].append("a"); return btree_not_found;}
 
             result_t myres = btree_ok;
 
@@ -2636,7 +2538,6 @@ private:
                         parent_dup->set_slotkey(parentslot, leaf->key(leaf->get_slotuse() - 1));
                         dup_epilogue(tid, parent, parent_dup);
                     }
-                    // if (locking_res == false) {tlx::bug_log[tid].append("b"); return btree_not_found;}
                 }
                 else
                 {
@@ -2668,14 +2569,12 @@ private:
                     free_node(tid, root_);
 
                     // root_ = leaf = nullptr; // TODO
-                    std::cout << "OMG " << (leaf == root_) << std::endl;
                     auto root_dup = dup_prologue(tid, orig_root);
                     if (root_dup != nullptr)
                     {
                         root_dup = nullptr;
                         dup_epilogue(tid, orig_root, root_dup);
                     }
-                    // if (locking_res == false) {tlx::bug_log[tid].append("c"); return btree_not_found;}
 
                     new_root = root_dup;
 
@@ -2684,9 +2583,8 @@ private:
                         leaf_dup = nullptr;
                         dup_epilogue(tid, leaf, leaf_dup);
                     }
-                    // if (locking_res == false) {tlx::bug_log[tid].append("d"); return btree_not_found;}
                     
-                    // head_leaf_ = tail_leaf_ = nullptr;
+                    // head_leaf_ = tail_leaf_ = nullptr; // TODO
 
                     // will be decremented soon by insert_start()
                     TLX_BTREE_ASSERT(stats_.size == 1);
@@ -2705,7 +2603,6 @@ private:
                         myres |= merge_leaves(tid, left_leaf, leaf, left_parent);
                     else
                         myres |= merge_leaves(tid, leaf, right_leaf, right_parent);
-                    // if (locking_res == false) {tlx::bug_log[tid].append("e"); return btree_not_found;}
                 }
                 // case : the right leaf has extra data, so balance right with
                 // current
@@ -2717,7 +2614,6 @@ private:
                             tid, leaf, right_leaf, right_parent, parentslot);
                     else
                         myres |= merge_leaves(tid, left_leaf, leaf, left_parent);
-                    // if (locking_res == false) {tlx::bug_log[tid].append("f"); return btree_not_found;}
                 }
                 // case : the left leaf has extra data, so balance left with
                 // current
@@ -2729,7 +2625,6 @@ private:
                             tid, left_leaf, leaf, left_parent, parentslot - 1);
                     else
                         myres |= merge_leaves(tid, leaf, right_leaf, right_parent);
-                    // if (locking_res == false) {tlx::bug_log[tid].append("g"); return btree_not_found;}
                 }
                 // case : both the leaf and right leaves have extra data and our
                 // parent, choose the leaf with more data
@@ -2741,7 +2636,6 @@ private:
                     else
                         shift_right_leaf(
                             tid, left_leaf, leaf, left_parent, parentslot - 1);
-                    // if (locking_res == false) {tlx::bug_log[tid].append("h"); return btree_not_found;}
                 }
                 else
                 {
@@ -2751,7 +2645,6 @@ private:
                     else
                         myres |= shift_left_leaf(
                             tid, leaf, right_leaf, right_parent, parentslot);
-                    // if (locking_res == false) {tlx::bug_log[tid].append("i"); return btree_not_found;}
                 }
             }
             
@@ -2799,7 +2692,6 @@ private:
                 myleft, myright,
                 myleft_parent, myright_parent,
                 inner, slot);
-            // if (locking_res == false) {tlx::bug_log[tid].append("0"); return btree_not_found;}
 
             result_t myres = btree_ok;
 
@@ -2823,7 +2715,6 @@ private:
                         parent_dup->set_slotkey(parentslot, result.lastkey);
                         dup_epilogue(tid, parent, parent_dup);
                     }
-                    // if (locking_res == false) {tlx::bug_log[tid].append("j"); return btree_not_found;}
                 }
                 else
                 {
@@ -2859,7 +2750,6 @@ private:
                     inner_dup->set_slotuse(inner_dup->get_slotuse() - 1);
                     dup_epilogue(tid, inner, inner_dup);
                 }
-                // if (locking_res == false) {tlx::bug_log[tid].append("k"); return btree_not_found;}
                 
                 if (inner->get_level() == 1)
                 {
@@ -2872,7 +2762,6 @@ private:
                         inner_dup->set_slotkey(slot, child->key(child->get_slotuse() - 1));
                         dup_epilogue(tid, inner, inner_dup);
                     }
-                    // if (locking_res == false) {tlx::bug_log[tid].append("l"); return btree_not_found;}
                 }
             }
 
@@ -2893,7 +2782,6 @@ private:
                         root_dup = inner->get_child(0);
                         dup_epilogue(tid, orig_root, root_dup);
                     }
-                    // if (locking_res == false) {tlx::bug_log[tid].append("m"); return btree_not_found;}
 
                     new_root = root_dup;
 
@@ -2902,7 +2790,6 @@ private:
                         inner_dup->set_slotuse(0);
                         dup_epilogue(tid, inner, inner_dup);
                     }
-                    // if (locking_res == false) {tlx::bug_log[tid].append("n"); return btree_not_found;}
 
                     free_node(tid, inner);
                     
@@ -2920,7 +2807,6 @@ private:
                     else
                         myres |= merge_inner(
                             tid, inner, right_inner, right_parent, parentslot);
-                    // if (locking_res == false) {tlx::bug_log[tid].append("o"); return btree_not_found;}
                 }
                 // case : the right leaf has extra data, so balance right with
                 // current
@@ -2933,7 +2819,6 @@ private:
                     else
                         myres |= merge_inner(
                             tid, left_inner, inner, left_parent, parentslot - 1);
-                    // if (locking_res == false) {tlx::bug_log[tid].append("p"); return btree_not_found;}
                 }
                 // case : the left leaf has extra data, so balance left with
                 // current
@@ -2948,7 +2833,6 @@ private:
                         myres |= merge_inner(
                             tid, inner, right_inner, right_parent, parentslot);
                     }
-                    // if (locking_res == false) {tlx::bug_log[tid].append("q"); return btree_not_found;}
                 }
                 // case : both the leaf and right leaves have extra data and our
                 // parent, choose the leaf with more data
@@ -2962,7 +2846,6 @@ private:
                         shift_right_inner(
                             tid, left_inner, inner, left_parent, parentslot - 1);
                     }
-                    // if (locking_res == false) {tlx::bug_log[tid].append("r"); return btree_not_found;}
                 }
                 else
                 {
@@ -2974,7 +2857,6 @@ private:
                         shift_left_inner(
                             tid, inner, right_inner, right_parent, parentslot);
                     }
-                    // if (locking_res == false) {tlx::bug_log[tid].append("s"); return btree_not_found;}
                 }
             }
             
