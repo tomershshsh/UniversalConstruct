@@ -16,6 +16,8 @@
 #include <unordered_map>
 #include <iostream>
 
+#include <sstream>
+
 namespace tlx {
 
 // *** Debugging Macros
@@ -59,7 +61,6 @@ const unsigned char DUP_MASK = 0x01;
 const unsigned char DEL_MASK = 0x02;
 const unsigned int MAX_UINT = std::numeric_limits<unsigned int>::max();
 
-bool do_print = false;
 
 /*!
  * Generates default traits for a B+ tree used as a set or map. It estimates
@@ -105,7 +106,6 @@ public:
     unsigned short slotuse;
 
 	unsigned char flags;
-	pthread_spinlock_t dup_lock;
     
 	inline bool is_del() { return (flags & DEL_MASK) == DEL_MASK; }
 	inline void set_del() { flags |= DEL_MASK; }
@@ -247,7 +247,106 @@ thread_local node* orig_root;
 thread_local node* new_root;
 
 template <typename Key, typename Value>
-bool dup_open(node*& root)
+void pseudo_print_tree(node * n, int num_tabs, std::stringstream& total)
+{
+    if (!n)
+        return;
+
+    if (n->is_leafnode())
+    {
+        Leafnode * ln = static_cast<Leafnode *>(n);
+        for (int j = 0; j < num_tabs; j++)
+        {
+            total << "\t";
+        }
+        total << ln << "\n";
+        for (int i = 0; i < ln->slotuse; i++)
+        {
+            for (int j = 0; j < num_tabs + 1; j++)
+            {
+                total << "\t";
+            }
+            total << ln->slotdata[i].first << "\n";
+        }
+    }
+    else
+    {
+        Innernode * in = static_cast<Innernode *>(n);
+        for (int j = 0; j < num_tabs; j++)
+        {
+            total << "\t";
+        }
+        total << in << "\n";
+        for (int i = 0; i < in->slotuse; i++)
+        {
+            for (int j = 0; j < num_tabs; j++)
+            {
+                total << "\t";
+            }
+            total << in->slotkey[i] << "\n";
+        }
+        for (int i = 0; i <= in->slotuse; i++)
+        {
+            pseudo_print_tree<Key, Value>(in->childid[i], num_tabs + 1, total);
+        }
+    }
+}
+
+template <typename Key, typename Value>
+void print_tree(node * n, int num_tabs)
+{
+    if (!n)
+        return;
+
+    if (n->is_leafnode())
+    {
+        Leafnode * ln = static_cast<Leafnode *>(n);
+        for (int j = 0; j < num_tabs; j++)
+        {
+            std::cout << "\t";
+        }
+        std::cout << ln << std::endl;
+        for (int i = 0; i < ln->slotuse; i++)
+        {
+            for (int j = 0; j < num_tabs + 1; j++)
+            {
+                std::cout << "\t";
+            }
+            std::cout << ln->slotdata[i].first << std::endl;
+        }
+    }
+    else
+    {
+        Innernode * in = static_cast<Innernode *>(n);
+        for (int j = 0; j < num_tabs; j++)
+        {
+            std::cout << "\t";
+        }
+        std::cout << in << std::endl;
+        for (int i = 0; i < in->slotuse; i++)
+        {
+            for (int j = 0; j < num_tabs; j++)
+            {
+                std::cout << "\t";
+            }
+            std::cout << in->slotkey[i] << std::endl;
+        }
+        for (int i = 0; i <= in->slotuse; i++)
+        {
+            if (in->childid[i] == 0 || in == in->childid[i])
+            {
+                std::cout << "error " << in << "->childid[" << i << "] == " << in->childid[i] << std::endl;
+            }
+            else
+            {
+                print_tree<Key, Value>(in->childid[i], num_tabs + 1);
+            }
+        }
+    }
+}
+
+template <typename Key, typename Value>
+bool pc_open(node** root)
 {
 	if (duplications)
 		duplications->clear();
@@ -264,22 +363,22 @@ bool dup_open(node*& root)
     else
         allocated = new std::unordered_map<node*, bool>();
 
-	orig_root = root;
-	new_root = nullptr;
+	orig_root = *root;
+	new_root = *root;
 	in_writing_function = true;
 	pc_happened = false;
 	return true;
 }
 
 template <typename Key, typename Value>
-bool dup_close(node*& root)
+bool pc_close(node** root)
 {
 	in_writing_function = false;
 
 	if (pc_happened)
 	{
 		return __atomic_compare_exchange_n(
-            &root, 
+            root, 
             &orig_root, 
             new_root, 
             true, 
@@ -301,7 +400,6 @@ void node::initialize(const unsigned short l) {
     level = l;
     slotuse = 0;
     flags = 0;
-    pthread_spin_init(&dup_lock, PTHREAD_PROCESS_PRIVATE);
 }
 
 bool node::is_leafnode() const {
@@ -446,7 +544,6 @@ void Innernode::set_child(unsigned short slot, node * new_child) {
 
 template <typename Key, typename Value>
 void Innernode::copy_to_childid(node ** src_first, node ** src_last, node ** dst_last) {
-    // std::memcpy((void*)(childid + offset), (void *)src_first, (long long int)src_last - (long long int)src_first);
     std::copy(src_first, src_last, dst_last);
 }
 

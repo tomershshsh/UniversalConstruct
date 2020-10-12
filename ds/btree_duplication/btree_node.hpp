@@ -16,10 +16,6 @@
 #include <unordered_map>
 #include <iostream>
 
-#include <mutex>
-#include <thread>
-#include <sstream>
-
 namespace tlx {
 
 // *** Debugging Macros
@@ -62,8 +58,6 @@ namespace tlx {
 const unsigned char DUP_MASK = 0x01;
 const unsigned char DEL_MASK = 0x02;
 const unsigned int MAX_UINT = std::numeric_limits<unsigned int>::max();
-
-std::mutex g_mutex;
 
 
 /*!

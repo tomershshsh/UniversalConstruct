@@ -1,8 +1,16 @@
 #pragma once
 
 #include <vector>
+#include <unordered_map>
+#include <mutex>
+#include "record_manager.h"
 
+#define Node node_t<skey_t, sval_t>
+
+const unsigned char DUP_MASK = 0x01;
 const unsigned char DEL_MASK = 0x02;
+const unsigned int MAX_UINT = std::numeric_limits<unsigned int>::max();
+static std::mutex g_mutex;
 
 enum class node_field
 {
@@ -18,71 +26,99 @@ struct write_params_t
 	void* replacement;
 };
 
-template <typename skey_t>
+template <typename skey_t, typename sval_t>
 class node_t
 {
-private:
-	using node = node_t<skey_t>;
-
+public:
+// private:
 	skey_t key;
-	std::vector<node*> children;
+	sval_t value;
 	unsigned char flags;
+	std::vector<Node*> children; 
 
+	inline bool is_dup() { return (flags & DUP_MASK) == DUP_MASK; }
+	inline void set_dup() { flags ^= DUP_MASK; }
 	inline bool is_del() { return (flags & DEL_MASK) == DEL_MASK; }
 	inline void set_del() { flags |= DEL_MASK; }
 
-	node* write(write_params_t&& params)
-	{
-		switch (params.field_indicator)
-		{
-		case node_field::KEY:
-			key = *(skey_t*)params.replacement;
-			break;
-		case node_field::CHILD:
-			if (params.specifier < children.size())
-				children[params.specifier] = (node*)params.replacement;
-			break;
-		case node_field::DELETE:
-			set_del();
-			break;
-		default:
-			break;
-		}
+	skey_t get_key();
+	sval_t get_value();
+	Node* get_child(unsigned int child_idx);
+	bool is_deleted();
 
-		return this;
-	}
+	Node* set_key(const skey_t& new_key);
+	Node* set_child(unsigned int child_idx, Node* new_child);
+	Node* delete_node();
 
-public:
-	node_t(const skey_t& key, unsigned int max_num_children) :
-		key(key), children(max_num_children, nullptr), flags(0) {}
-	node_t(const node_t& node) :
-		key(node.key), children(node.children), flags(node.flags) {}
-	virtual ~node_t() = default;
-
-	skey_t get_key() { return key; }
-
-	node* get_child(unsigned int child_idx)
-	{
-		if (child_idx >= children.size())
-			return nullptr;
-
-		return children.at(child_idx);
-	}
-
-	bool is_deleted() { return is_del(); }
-
-	node* set_key(const skey_t& new_key)
-	{
-		return write({ node_field::KEY, 0, (void*)& new_key });
-	}
-
-	node* set_child(unsigned int child_idx, node* new_child)
-	{
-		return write({ node_field::CHILD, child_idx, (void*)new_child });
-	}
-
-	node* delete_node()
-	{
-		return write({ node_field::DELETE, 0, nullptr });
-	}
+	static bool open(Node*& root);
+	static bool close(Node*& root);
 };
+
+template<typename skey_t, typename sval_t>
+struct duplication_info_t
+{
+	Node* dup;
+	Node* orig_parent;
+	unsigned int orig_idx;
+};
+
+template <typename skey_t, typename sval_t>
+bool Node::open(Node*& root)
+{
+	return true;
+}
+
+template<typename skey_t, typename sval_t>
+bool Node::close(Node*& root)
+{
+	return true;
+}
+
+template<typename skey_t, typename sval_t>
+skey_t Node::get_key() 
+{
+	return key; 
+}
+
+template<typename skey_t, typename sval_t>
+sval_t Node::get_value()
+{
+	return value;
+}
+
+template<typename skey_t, typename sval_t>
+Node* Node::get_child(unsigned int child_idx)
+{
+	if (child_idx >= children.size())
+		return nullptr;
+
+	Node* child = children.at(child_idx);
+	return child;
+}
+
+template<typename skey_t, typename sval_t>
+bool Node::is_deleted()
+{ 
+	return is_del(); 
+}
+
+template<typename skey_t, typename sval_t>
+Node* Node::set_key(const skey_t& new_key)
+{
+	this->key = new_key;
+	return this;
+}
+
+template<typename skey_t, typename sval_t>
+Node* Node::set_child(unsigned int child_idx, Node* new_child)
+{
+	this->children[child_idx] = new_child;
+	return this;
+}
+
+template<typename skey_t, typename sval_t>
+Node* Node::delete_node()
+{
+	this->set_del();
+	return this;
+}

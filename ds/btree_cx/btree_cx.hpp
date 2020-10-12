@@ -1,10 +1,12 @@
 #pragma once
 
 #include "btree.hpp"
+#include "CX/ucs/CXMutationWF.hpp"
 #include "record_manager.h"
+#include <iostream>
 
 template <typename skey_t, typename sval_t, class RecMgr>
-class btree_dup {
+class btree_ser {
 public:
     //! \name Template Parameter Types
     //! \{
@@ -32,7 +34,7 @@ public:
     //! \{
 
     //! Typedef of our own type
-    typedef btree_dup<key_type, data_type, RecMgr> self;
+    typedef btree_ser<key_type, data_type, RecMgr> self;
 
     //! Construct the STL-required value_type as a composition pair of key and
     //! data types
@@ -120,6 +122,7 @@ private:
 
     //! The contained implementation object
     btree_impl tree_;
+    CXMutationWF<btree_impl> cx {new btree_impl(64, allocator_type())};
 
     const unsigned int idx_id;
     const skey_t KEY_MIN;
@@ -136,7 +139,7 @@ public:
 
     //! Default constructor initializing an empty B+ tree with the standard key
     //! comparison function
-    explicit btree_dup(
+    explicit btree_ser(
         const int _NUM_THREADS, 
         const skey_t& _KEY_MIN, 
         const skey_t& _KEY_MAX, 
@@ -150,11 +153,13 @@ public:
     { 
         const int tid = 0;
         initThread(tid);
+        std::cout << cx.className() << std::endl;
+        // cx = new CXMutationWF<btree_impl>(&tree_);
         tree_.recmgr->endOp(tid);
     }
 
     //! Frees up all used B+ tree memory pages
-    ~btree_dup()
+    ~btree_ser()
     {
         delete tree_.recmgr; 
     }
@@ -218,16 +223,13 @@ public:
 
     //! Tries to locate a key in the B+ tree and returns an iterator to the
     //! key/data slot if found. If unsuccessful it returns end().
-    sval_t find(const int tid, const skey_t& key) 
-    {
+    sval_t find(const int tid, const skey_t& key) {
         auto guard = tree_.recmgr->getGuard(tid, true);
         auto it = tree_.find(key);
-        if (it == tree_.end()) {
+        if (it == tree_.end())
             return NO_VALUE;
-        }
-        else {
+        else
             return (*it).second;
-        }
     }
 
 public:
@@ -236,45 +238,18 @@ public:
 
     //! Attempt to insert a key/data pair into the B+ tree. Fails if the pair is
     //! already present.
-    sval_t insert(const int tid, const skey_t& key, const sval_t& value) 
-    {
-        while (1)
-        {            
-            auto guard = tree_.recmgr->getGuard(tid);
-            tlx::dup_open<key_type, value_type>(tid, &tree_.root_);
-            tlx::locking_res = true;
-            auto insertion_res = tree_.insert(tid, std::make_pair(key, value));
-
-            if (tlx::locking_res && tlx::dup_close<key_type, value_type>(tid, &tree_.root_))
-            {
-                for (auto& d : *tlx::duplications)
-                {
-                    if (d.first->is_leafnode()) {
-                        tree_.recmgr->retire(tid, static_cast<tlx::leaf_node<key_type, value_type>*>(d.first));
-                    }
-                    else {
-                        tree_.recmgr->retire(tid, static_cast<tlx::inner_node<key_type, value_type>*>(d.first));
-                    }
-                }
-                
-                if (insertion_res.second)
-                    return NO_VALUE;
-                else
-                    return value;
-            }
-            else
-            {
-                for (auto& d : *tlx::allocated)
-                {
-                    if (d.first->is_leafnode()) {
-                        tree_.recmgr->deallocate(tid, static_cast<tlx::leaf_node<key_type, value_type>*>(d.first));
-                    }
-                    else {
-                        tree_.recmgr->deallocate(tid, static_cast<tlx::inner_node<key_type, value_type>*>(d.first));
-                    }
-                }
-            }
-        }
+    sval_t insert(const int tid, const skey_t& key, const sval_t& value) {
+        auto guard = tree_.recmgr->getGuard(tid);
+        std::cout << "1" << std::endl;
+        bool result = cx.applyUpdate([=] (btree_impl *tree) {
+            auto res = tree->insert(tid, std::make_pair(key, value));
+            return res.second;
+        }, tid);
+        std::cout << "2" << std::endl;
+        if (result)
+            return NO_VALUE;
+        else
+            return value;
     }
 
     //! \}
@@ -285,45 +260,17 @@ public:
 
     //! Erases the key/data pairs associated with the given key. For this
     //! unique-associative map there is no difference to erase().
-    sval_t erase(const int tid, const skey_t& key) 
-    {
-        while (1)
-        {
-            auto guard = tree_.recmgr->getGuard(tid);
-            tlx::dup_open<key_type, value_type>(tid, &tree_.root_);
-            tlx::locking_res = true;
-            auto removal_res = tree_.erase_one(tid, key);
+    sval_t erase(const int tid, const skey_t& key) {
+        auto guard = tree_.recmgr->getGuard(tid);
 
-            if (tlx::locking_res && tlx::dup_close<key_type, value_type>(tid, &tree_.root_))
-            {
-                for (auto& d : *tlx::duplications)
-                {
-                    if (d.first->is_leafnode()) {
-                        tree_.recmgr->retire(tid, static_cast<tlx::leaf_node<key_type, value_type>*>(d.first));
-                    }
-                    else {
-                        tree_.recmgr->retire(tid, static_cast<tlx::inner_node<key_type, value_type>*>(d.first));
-                    }
-                }
+        bool result = cx.applyUpdate([=] (btree_impl *tree) {
+            return tree->erase_one(tid, key);
+        }, tid);
 
-                if (removal_res)
-                    return (sval_t)(&key);
-                else
-                    return NO_VALUE;
-            }
-            else
-            {
-                for (auto& d : *tlx::allocated)
-                {
-                    if (d.first->is_leafnode()) {
-                        tree_.recmgr->deallocate(tid, static_cast<tlx::leaf_node<key_type, value_type>*>(d.first));
-                    }
-                    else {
-                        tree_.recmgr->deallocate(tid, static_cast<tlx::inner_node<key_type, value_type>*>(d.first));
-                    }
-                }
-            }
-        }
+        if (result)
+            return (sval_t)(&key);
+        else
+            return NO_VALUE;
     }
 
     //! \}

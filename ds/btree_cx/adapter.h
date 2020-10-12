@@ -16,11 +16,11 @@
 #   define TREE_STATS_BYTES_AT_DEPTH
 #   include "tree_stats.h"
 #endif
-#include "btree_pc.hpp"
+#include "btree_cx.hpp"
 #include <iostream>
 
 #define RECORD_MANAGER_T record_manager<Reclaim, Alloc, Pool, tlx::inner_node<K, std::pair<K,V>>, tlx::leaf_node<K, std::pair<K,V>>>
-#define DATA_STRUCTURE_T btree_dup<K, V, RECORD_MANAGER_T>
+#define DATA_STRUCTURE_T btree_ser<K, V, RECORD_MANAGER_T>
 
 template <typename K, typename V, class Reclaim = reclaimer_debra<K>, class Alloc = allocator_new<K>, class Pool = pool_none<K>>
 class ds_adapter {
@@ -105,12 +105,11 @@ public:
         public:
             ChildIterator(NodePtrType _node) {
                 node = _node;
-                if (node)
-                    for (int i = 0; i <= node->slotuse; i++)
-                        child_slots[i] = true;
+                for (int i = 0; i <= node->slotuse; i++)
+                    child_slots[i] = true;
             }
             bool hasNext() {
-                if (!node || node->is_leafnode())
+                if (node->is_leafnode())
                     return false;
 
                 bool res = false;
@@ -120,7 +119,7 @@ public:
                 return res;
             }
             NodePtrType next() {
-                if (!node || node->is_leafnode())
+                if (node->is_leafnode())
                     setbench_error("ERROR: it is suspected that you are calling ChildIterator::next() without first verifying that it hasNext()");
                 
                 struct DATA_STRUCTURE_T::btree_impl::InnerNode* in = 
@@ -138,20 +137,20 @@ public:
         };
         
         bool isLeaf(NodePtrType node) {
-            return (node && node->is_leafnode());
+            return node->is_leafnode();
         }
         size_t getNumChildren(NodePtrType node) {
-            if (!node || isLeaf(node)) return 0;
+            if (isLeaf(node)) return 0;
             return node->slotuse + 1;
         }
         size_t getNumKeys(NodePtrType node) {
-            if (!node || !node->is_leafnode()) return 0;
+            if (!node->is_leafnode()) return 0;
             return node->slotuse;
         }
         size_t getSumOfKeys(NodePtrType node) {
             int sum_keys = 0;
 
-            if (node && node->is_leafnode()) {
+            if (node->is_leafnode()) {
                 struct DATA_STRUCTURE_T::btree_impl::LeafNode* ln = 
                     static_cast<struct DATA_STRUCTURE_T::btree_impl::LeafNode*>(node);
                 for (int i = 0; i < node->slotuse; i++) {
@@ -163,12 +162,7 @@ public:
         ChildIterator getChildIterator(NodePtrType node) {
             return ChildIterator(node);
         }
-        static size_t getSizeInBytes(NodePtrType node) { 
-            if (node)
-                return sizeof(*node); 
-            else
-                return 0;
-        }
+        static size_t getSizeInBytes(NodePtrType node) { return sizeof(*node); }
     };
 
     TreeStats<NodeHandler> * createTreeStats(const K& _minKey, const K& _maxKey) {

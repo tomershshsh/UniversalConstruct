@@ -1882,7 +1882,7 @@ private:
             if (newroot_dup != nullptr) {
                 newroot_dup->set_slotkey(0, newkey);
 
-                newroot_dup->set_child(0, orig_root);
+                newroot_dup->set_child(0, new_root);
                 newroot_dup->set_child(1, newchild);
 
                 newroot_dup->set_slotuse(1);
@@ -3269,11 +3269,11 @@ private:
         }     
 
         //TODO - iterator stuff
-        // left->next_leaf = right->next_leaf;
-        // if (left->next_leaf)
-        //     left->next_leaf->prev_leaf = left;
-        // else
-        //     tail_leaf_ = left;
+        left->next_leaf = right->next_leaf;
+        if (left->next_leaf)
+            left->next_leaf->prev_leaf = left;
+        else
+            tail_leaf_ = left;
 
         // auto right_dup = static_cast<LeafNode*>(dup_prologue(tid, right));
         if (right_dup != nullptr) {

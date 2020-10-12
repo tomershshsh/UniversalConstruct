@@ -241,10 +241,9 @@ public:
         while (1)
         {
             auto guard = tree_.recmgr->getGuard(tid);
-            tlx::dup_open<key_type, value_type>(tree_.root_);
-            tlx::locking_res = true;
+            tlx::pc_open<key_type, value_type>(&tree_.root_);
             auto insertion_res = tree_.insert(tid, std::make_pair(key, value));
-            if ( tlx::dup_close<key_type, value_type>(tree_.root_) && tlx::locking_res) //TODO
+            if ( tlx::pc_close<key_type, value_type>(&tree_.root_)) //TODO
             {
                 for (auto& d : *tlx::duplications)
                 {
@@ -257,7 +256,11 @@ public:
                 }
                 
                 if (insertion_res.second)
+                {  
+                    // std::cout << "after iserting " << key << std::endl;
+                    // tlx::print_tree<key_type, value_type>(tree_.root_, 0);
                     return NO_VALUE;
+                }
                 else
                     return value;
             }
@@ -271,8 +274,6 @@ public:
                     else {
                         tree_.recmgr->deallocate(tid, static_cast<tlx::inner_node<key_type, value_type>*>(d.first));
                     }
-
-                    // recmgr->deallocate(tid, d.first);
                 }
             }
         }
@@ -291,10 +292,9 @@ public:
         while (1)
         {
             auto guard = tree_.recmgr->getGuard(tid);
-            tlx::dup_open<key_type, value_type>(tree_.root_);
-            tlx::locking_res = true;
+            tlx::pc_open<key_type, value_type>(&tree_.root_);
             auto removal_res = tree_.erase_one(tid, key);
-            if ( tlx::dup_close<key_type, value_type>(tree_.root_) && tlx::locking_res)
+            if ( tlx::pc_close<key_type, value_type>(&tree_.root_))
             {
                 for (auto& d : *tlx::duplications)
                 {
