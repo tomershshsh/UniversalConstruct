@@ -223,19 +223,34 @@ public:
 	unsigned int orig_idx;
 };
 
+// class path_node_t
+// {
+// public:
+//     node * current;
+//     unsigned int height;
+//     path_node_t * parent;
+//     unsigned int index;
+//     path_node_t * children[btree_default_traits<Key, Value>::inner_slots + 1];
+// };
+
 class path_info_t
 {
 public:
-    node* child;
-    node* parent;
-    unsigned int child_idx;
+    node * self;
+    node * parent;
+    unsigned short index;
+    unsigned short height;
 };
 
 thread_local std::unordered_map<node*, duplication_info_t>* duplications = nullptr;
 
 thread_local std::unordered_map<node*, bool>* locked = nullptr;
 
-thread_local std::unordered_map<node*, std::pair<node*, unsigned short>>* node_parent_map = nullptr;
+thread_local std::unordered_map<node*, path_info_t>* node_parent_map = nullptr;
+
+// thread_local std::unordered_map<node*, path_node_t>* path = nullptr;
+// thread_local node * left_most_dup = nullptr;
+// thread_local node * right_most_dup = nullptr;
 
 thread_local std::unordered_map<node*, bool>* allocated = nullptr;
 
@@ -263,17 +278,29 @@ bool dup_open(int tid, node** root)
     if (node_parent_map)
 		node_parent_map->clear();
 	else
-		node_parent_map = new std::unordered_map<node*, std::pair<node*, unsigned short>>();
+		// node_parent_map = new std::unordered_map<node*, std::pair<node*, unsigned short>>();
+        node_parent_map = new std::unordered_map<node*, path_info_t>();
 
     if (allocated)
         allocated->clear();
     else
         allocated = new std::unordered_map<node*, bool>();
 
+    // if (path)
+    //     path->clear();
+    // else
+    //     path = new std::unordered_map<node*, path_info_t>();
+    // left_most_dup = nullptr;
+    // right_most_dup = nullptr;
+
 	orig_root = *root;
 	new_root = *root;
 	in_writing_function = true;
 	dup_happened = false;
+
+    if (orig_root)
+        node_parent_map->insert({ orig_root, { orig_root, nullptr, 0, 0 }});
+
 	return true;
 }
 
@@ -477,21 +504,30 @@ node * Innernode::get_child(unsigned short slot) const
     if (in_writing_function)
     {
         node * orig = (node*)this;
+
+        unsigned short parent_height = 0;
+        if (node_parent_map->find(orig) != node_parent_map->end())
+            parent_height = node_parent_map->at(orig).height;
+
         if (duplications->find(orig) != duplications->end())
         {
             node* dup = (duplications->at(orig)).dup;
             child = ((Innernode*)dup)->childid[slot];
-            node_parent_map->insert(
-                std::make_pair<node*, std::pair<node*, unsigned short>>(
-                    (node*)child, std::make_pair<node*, unsigned short>(
-                        (node*)dup, (unsigned short)slot)));
+            // node_parent_map->insert(
+            //     std::make_pair<node*, std::pair<node*, unsigned short>>(
+            //         (node*)child, std::make_pair<node*, unsigned short>(
+            //             (node*)dup, (unsigned short)slot)));
+            node_parent_map->insert({
+                    (node*)child, { (node*)child, (node*)dup, (unsigned short)slot, (unsigned short)(parent_height + 1) }});
         }
         else
         {
-            node_parent_map->insert(
-                std::make_pair<node*, std::pair<node*, unsigned short>>(
-                    (node*)child, std::make_pair<node*, unsigned short>(
-                        (node*)this, (unsigned short)slot)));
+            // node_parent_map->insert(
+            //     std::make_pair<node*, std::pair<node*, unsigned short>>(
+            //         (node*)child, std::make_pair<node*, unsigned short>(
+            //             (node*)this, (unsigned short)slot)));
+            node_parent_map->insert({
+                    (node*)child, { (node*)child, (node*)this, (unsigned short)slot, (unsigned short)(parent_height + 1) }});
         }
     }
 

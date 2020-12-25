@@ -1159,7 +1159,8 @@ public:
         if (node_parent_map->find(orig) != node_parent_map->end())
         {
             auto found = node_parent_map->at(orig);
-            parent = found.first;
+            // parent = found.first;
+            parent = found.parent;
         }
 
         if (parent != nullptr && locked->find(parent) == locked->end())
@@ -1215,8 +1216,10 @@ public:
                 if (node_parent_map->find(orig) != node_parent_map->end())
                 {
                     auto found = node_parent_map->at(orig);
-                    parent = found.first;
-                    child_idx = found.second;
+                    // parent = found.first;
+                    // child_idx = found.second;
+                    parent = found.parent;
+                    child_idx = found.index;
                 }
             }
             else
@@ -1263,6 +1266,53 @@ public:
 
         dup_happened = true;
         return dup;
+    }
+
+    node * dup_paths_to_lca_helper(const int& tid, node * first, node * second)
+    {
+        auto current_1 = node_parent_map->at(second);
+        auto current_2 = node_parent_map->at(first);
+        
+        while (current_1.height > current_2.height)
+        {
+            auto temp = dup_prologue(tid, current_1.self);
+            dup_epilogue(tid, current_1.self, temp);
+            current_1 = node_parent_map->at(current_1.parent);
+        }
+        
+        while (current_1.height < current_2.height)
+        {
+            auto temp = dup_prologue(tid, current_2.self);
+            dup_epilogue(tid, current_2.self, temp);
+            current_2 = node_parent_map->at(current_2.parent);
+        }
+        
+        while (current_1.self != current_2.self)
+        {
+            auto temp_1 = dup_prologue(tid, current_1.self);
+            dup_epilogue(tid, current_1.self, temp_1);
+
+            auto temp_2 = dup_prologue(tid, current_1.self);
+            dup_epilogue(tid, current_1.self, temp_2);
+
+            current_1 = node_parent_map->at(current_1.parent);
+            current_2 = node_parent_map->at(current_2.parent);
+        }
+        
+        return current_1.self;
+    }
+
+    void dup_paths_to_lca(const int& tid)
+    {
+        if (duplications->size() == 0)
+            return;
+
+        auto first = duplications->begin()->first;
+        
+        for (auto it = ++(duplications->begin()); it != duplications->end(); ++it)
+        {
+            first = dup_paths_to_lca_helper(tid, first, it->first);
+        }
     }
 
     //! \}

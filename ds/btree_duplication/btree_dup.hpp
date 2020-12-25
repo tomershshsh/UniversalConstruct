@@ -239,11 +239,12 @@ public:
     sval_t insert(const int tid, const skey_t& key, const sval_t& value) 
     {
         while (1)
-        {            
+        {
             auto guard = tree_.recmgr->getGuard(tid);
             tlx::dup_open<key_type, value_type>(tid, &tree_.root_);
             tlx::locking_res = true;
             auto insertion_res = tree_.insert(tid, std::make_pair(key, value));
+            tree_.dup_paths_to_lca(tid);
 
             if (tlx::locking_res && tlx::dup_close<key_type, value_type>(tid, &tree_.root_))
             {
@@ -293,6 +294,7 @@ public:
             tlx::dup_open<key_type, value_type>(tid, &tree_.root_);
             tlx::locking_res = true;
             auto removal_res = tree_.erase_one(tid, key);
+            tree_.dup_paths_to_lca(tid);
 
             if (tlx::locking_res && tlx::dup_close<key_type, value_type>(tid, &tree_.root_))
             {
