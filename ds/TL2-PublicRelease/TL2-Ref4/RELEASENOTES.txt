@@ -1,0 +1,962 @@
+
+Release notes: TL2 -- 2006.9.12
+~~~~~~~~~~~~~
+
+*   Copyright (c) 2006 Sun Microsystems, Inc.  All rights reserved.  
+    Notwithstanding any other term or condition, the license terms
+    accompanying the software govern and apply to it. 
+
+    We're releasing under a BSD license from OSI.
+    See SOFTWARELICENSE.txt for specifics.  
+
+*   Dave Dice, Nir Shavit, Ori Shalev
+    Contact Dave Dice (dave.dice@sun.com) regarding any questions.  
+
+*   As delivered, the package contains the sources for a 64-bit 
+    Solaris SPARC V9 -specific shared Red-Black tree based on TL2.  
+    We used the SUNPRO SS11 C compiler to build the binary.
+
+*   The code within is slight evolved from the code used to take
+    data for our DISC'06 paper.
+
+*   Transactional primitives - API
+    TxStart()       -- Start a transaction
+    TxLD()          -- Transactional load
+    TxST()          -- Transactional store
+    TxCommit()      -- Attempt to commit the current transaction
+    TxOnce()        -- one-shot global initialization
+    TxNewThread()   -- enroll a new thread for transactional operation
+
+    TL2 does not currently provide for any form of transaction nesting, although
+    simple "flattening" would be easy to implement. 
+
+*   We also provide a "helper" function, TxStoreLocal(), to perform stores
+    to known thread-local variables.  If the transaction aborts these
+    stores will be rolled-back.  If you're unsure whether a variable
+    is thread-local or shared and accessed transactionally, then the
+    safest approach is to be conservative and use TxST().  TxStoreLocal()
+    is simply a performance optimization.  Note that TxStoreLocal() doesn't handle
+    on-stack "auto" variables gracefully.  Currently, when aborting, the
+    roll-back logic can write to addresses beyond the current %sp.  
+    To avoid that, we could filter the roll-back addresses to avoid stores 
+    beyond the current %sp.
+
+*   It should be trivial to switch to another compiler, such as gcc.
+    In fact I'd recommend gcc 4.X over the SUNPRO compilers for TL2.
+    (If you elect to use gcc, start by transliterating the primitives 
+    in SUNPRO-specific .il file to __asm__ __volatile__ operations).  
+    Relatedly, it should be relatively easy to port to AMD64 or other 
+    operating systems such as linux.  
+
+*   The implementation currently uses an LP64 environment.  LP64 is
+    convenient as the "versioned lock word" type, vwLock, can be 
+    64-bit bits in length, avoiding -- at least as a practical concern --
+    the thorny issue of version number roll-over, while being accessed 
+    efficiently and atomically with 64-bit loads, stores and CAS (compare-and-swap).  
+
+    Alternately, it's possible to use an ILP32 environment and a 64-bit
+    vwLock.  All shared instances of the vwLock must be properly aligned
+    and accessed atomically.  (e.g., lock:cmpxchg8b and XMM loads and stores 
+    on IA32 or CASX,LDX and STX on SPARC V8+).  
+
+    Finally, it may be possible to use an ILP32 environment with a "natural"
+    32-bit vwLock.  Version number roll-over is a practical concern with 
+    a 32-bit vwLock.  In a managed environment we might be able to tolerate
+    roll-over by using a mechanism similar to that described in section 3.1.3 of:
+
+      Optimizing Memory Transactions  
+      Tim Harris, Mark Plesko, Avraham Shinnar, David Tarditi. 
+      June 2006 PLDI'06 (ACM SIGPLAN)
+      http://research.microsoft.com/~tharris/papers/2006-pldi.pdf
+
+    Harris uses the stop-the-world garbage collection facility of his managed
+    runtime environment to periodically halt all threads and force validation.
+    Alternately, he could simply abort all transactions running at the time
+    of the periodic collection.  
+
+    Note that in TL and the managed STM described by Harris et. al., validation
+    simply checks version numbers for equality in order to detect modification
+    and possible interference.  In TL2, however, version numbers are compared 
+    in magnitude, so a somewhat different approach to roll-over than the one 
+    described by Harris et. al. will be required.  
+
+*   We currently use a degenerate Bloom filter on the write-set to
+    accelerate lookaside in TxLD() and avoid read-after-write hazards.  
+    A better approach for larger write-sets or applications that exhibit
+    frequent read-after-write behavior  is likely to be the thread-private 
+    hash table mentioned in Harris et. al's "Optimizing Memory Transactions".  
+
+    Briefly, write-sets in the current TL2 implementation are thread local,
+    chronologically ordered (to avoid write-after-write hazards) and allow duplicates.
+    Readers -- the TxLD() operator --  must look-aside into the write-set.
+    We currently use a simple Bloom filter on the write-set to reduce the rate
+    of futile scans of the write-set.  If the filter test matches, however,
+    we currently scan the write-set from newest entered to oldest entered,
+    looking for the youngest matching write. 
+
+    Instead, we might implement a per-thread private open hash table where each 
+    slot "I" in the hash table array was a pointer to the youngest (most recent) 
+    element of the write-set whose address, hashed, is I.  In turn, we'd augment each 
+    write-set element with a pointer to the next older write-set element on the same 
+    hash chain.  The write-set would retain the usual chronological order but also have 
+    distinct hash equivalency chains threaded through the list.  The hash chains are
+    ordered from most recently added to least recently added.   TxStore()
+    would add a new write-set element in the usual way;  hash the stored-to address and
+    access the corresponding hash table entry (which points to the most recently added 
+    write-set element for that particular hash equivalency class); store that address into 
+    the just-added write-set element's hash linkage pointer, and then set the hash table 
+    entry to point to the just installed element.  The hash table chains are stack-like,
+    with TxStore() "pushing" new elements.  
+
+    The look-aside in the TxLD() operation would hash the address, access the hash table 
+    to find the start of the hash chain, and then iterate through the hash chain links until
+    it found a 1st matching address of NULL.  Ideally, this approach should reduce the number 
+    of write-set elements scanned during look-aside by a constant factor, although it's likely 
+    that it will provide benefit over the existing simplistic mechanism only when the write-set 
+    is relatively long.  
+
+    To avoid clearing the hash table at the end of a transaction we might augment each
+    the pointer in the hash table with a TxSequence field.  Each thread would also have 
+    a TxSequence field that it would increment in TxStart().  When accessed, if the thread's
+    current TxSequence field didn't match the field in the hash table, the hash table
+    pointer would be interpreted as null.  When the TxSequence field overflowed and rolled
+    over to 0 we'd explicitly clear all the hash table elements at TxStart()-time.
+
+*   On SPARC we use a special non-faulting in the implementation of the
+    TL2 transactional load operator (TxLD).  Non-faulting loads can easily
+    be emulated with signal handlers on non-SPARC architectures.
+
+*   We implement read-sets and write-sets (or more precisely, speculative
+    write-buffers) as thread-local linked lists of AVNodes.  A flat array
+    of AVNodes would likely be an improvement. 
+
+*   If a thread overflows its read-set or write-set it will currently 
+    abort and print a message to stderr.  It's possible to (a) 
+    resize and continue, or (b) abort, resize and then retry. 
+
+*   You'll want to run with libumem.so on Solaris.  (setenv LD_PRELOAD libumem.so).
+    The Red-Black tree code uses malloc/free and the libumem implementation
+    is highly scalable, much more so than the default malloc package.
+
+    Beware, however, that in order to provide scalability and avoid contention
+    libumem will employ per-thread sub-heaps ("slabs").  As such, the red-black
+    tree can end up populated with nodes from different slabs, often residing
+    on different pages.  This can result in a high rate of TLB misses as a thread
+    traverse or descends through the tree.  (The same problem exists in JVM's with
+    thread-local allocation buffers, or TLABs).  Large pages would provide some
+    relief, but at the time of this writing, libumem didn't support underlying
+    large pages.  Another option is to completely pre-allocate a large poll
+    of nodes in the primordial thread.  Typically, they would enjoy some degree
+    of spatial locality.  Threads would then allocate and return nodes to 
+    this pool. That, of course, introduces new sources of contention.  
+
+    Note too that libumem will introduce some non-determinism as it uses
+    repear threads to collect and scavenge certain resources.  Relatedly,
+    address-space randomization can result in apparent non-determinism
+    event for single-threaded runs.  
+
+*   The implementation currently provides only transactional load and store
+    operators of "intptr_t" size.  It's trivial, of course, to implement
+    sub-word operations (e.g., byte) in terms of full-word operations.  
+
+*   The TL2 code was originally derived from a TL1 implementation.  TL1, unlike
+    TL2, admits "zombie" transactions.  (A zombie transaction is still running
+    but has read inconsistent data and is fated to die.  Containing the effects
+    of such doomed zombies is a challenge outside managed runtime environments).  
+    Given its heritage and that we wanted to share red-black tree code between TL
+    and TL2, the red-black tree code still contains calls to TxValid().  
+
+    For a pure TL2 implementation we could remove the calls to TxValid()
+    in the red-black tree code.  To "escape" an aborting transaction we'd
+    call setjmp() in TxStart() and longjmp() in TxAbort().  At abort-time
+    the thread would simply longjmp back into TxStart() to retry the offending
+    operation.  Note that on most platforms setjmp() is relatively fast, while
+    longjmp() can be more expensive.  We'd need to be careful that longjmp()
+    overhead doesn't become excessive in environments with a high abort rate.
+
+    Relatedly, on platforms where we emulate non-faulting loads with signal
+    handlers we could simply longjmp() -- siglongjmp -- out of the signal handler back to
+    TxStart().  I believe that Harris/Fraser/Ennals use a similar approach
+    in LibLTX.  
+
+    You can either (a) sprinkle validation tests in loops in the txl code, 
+    unwinding explicitly if the txn is invalid, or (b) use setjmp-longjmp where 
+    a txn will longjmp back to TxStart if aborts.  (The longjmp calls will appear 
+    in txload and commit at the point where we deem a txn aborted).  The 
+    code currently uses (a), but I've tried the setjmp-longjmp form and it works 
+    quite well.  Note that for (a) you don't need to pair validation tests with 
+    txload or txstore, as once a txn is deemed invalid further stores originating 
+    from it are ignored.  Txloads employ a non-faulting load, so they're harmless.  
+    Ultimately, that means that the worst than that'll occur (other than FPU traps, 
+    perhaps) is that and aborted txn could become stuck in a loop.  We insert txvalid 
+    tests to escape. 
+
+    Beware that longjmp and siglongjmp requires a system call on SPARC to flush 
+    and invalidate the register windows, so it's rather expensive, (>5000 cycles
+    typically).  Setjmp is relatively cheap, however -- usually about 20 cycles.  
+
+    Typically transactional application code will use TxStart,TxCommit, etc., in a loop, 
+    retrying as necessary.  That is, aborts are exposed to the programmer.  If you opt to 
+    use setjmp-longjmp you can make the loop implicit and automatically retry simply by 
+    longjmp()ing back into txstart.  Depending on your particular philosophy regarding 
+    aborts, that could be seen as either good or bad.  One issue with setjmp-longjmp 
+    is that it's unhealthy to setjmp in a frame, unwind from that frame, and then subsequently 
+    longjmp back to that position.  (Put another way, it's OK to trim the stack with 
+    setjmp, but never to grow it or reconstitute frames that were returned from normally).  
+    That's precisely what'd happen if you simply placed setjmp in TxStart, as TxStart 
+    will then return to the application code.  You can avoid that problem by 
+    (a) inlining TxStart, (b) changing the API so that TxStart calls a closure which 
+    defines the txn (in this way the TxStart activation record stays live for the entire 
+    txn and thus can be longjmp-ed to at any point during the txn) or (c) having the 
+    caller invoke setjmp directly and then pass the jmpbuf into TxStart.  
+
+    Note that in C++ the situation is much better as the transactional infrastructure
+    could use an RAII idiom to enforce "balanced" transactional usage.  (See also
+    "ScopeGuards").  Briefly, the constructor would contain the TxStart and possibly
+    the setjmp call and the destructor would contain the TxCommit invocation.  
+
+    In addition, if your platform doesn't support non-faulting loads, then 
+    you can easily longjmp (siglongjmp) out of your signal handler to force the txn to retry.  
+
+*   Implementing OnAbort and OnCommit callbacks would be useful for 
+    certain applications.  OnCommit would be called after the write-back
+    has been completed but before the corresponding locks have been released.
+
+*   There are a number of tunable parameters in the sources.  The more interesting
+    ones are tagged with "TUNABLE" comments.
+
+*   We currently use simple test-and-test-and-set spin locks to acquire
+    versioned write locks.  It'd be interesting to try MCS or CLH locks.  
+
+*   In a CPP environment it's easy to use templates and overloading to
+    create "transactional" variables.  In this case, instead of explicit
+    calls to TxLD() and TxST() in the source, we can use normal assignment
+    syntax and depend on overloading to bind accesses to the transactional
+    variables to TxLD() and TxST().  
+
+*   TL2-specific "Thread" instances are currently type-stable and immortal.
+    Specifically, Thread structures should never be freed.  This constraint
+    arises from the fact that when locked, a versioned lock word's LSB is
+    1 and the rest of the lock word points to the owner's thread structure.
+    (Note that this also implies that the vwLock must be large enough to
+    hold a native pointer as well as the version number).  
+
+*   We associate a versioned lock-word with every transacted memory location.  
+    The mapping between transacted upon locations and versioned lock-words can be 
+    either many to one or one to one; each transacted upon location is associated 
+    with (we say "covered by") a single lock-word.  Our lock-words are simple single-word 
+    spinlocks, similar to a Linux "seqlocks", that use an atomic compare-and-swap (CAS) 
+    to acquire the lock and an ordinary store to release it.  Since one needs only 
+    a single bit to indicate that the lock is taken we use the rest of the word to 
+    hold a version number.  This number is advanced and updated by every successful lock release.  
+    (In TL1 we simply incremented the version number when releasing the lock, as
+    would be the case for a simple seqlock, while in TL2 we updated the lock version
+    number to reflect the committing thread's WV value).  Lock-words constitute 
+    transactional metadata and are not exposed to the application programmer.  
+    In practice, when the lock is held the version number is displaced and 
+    a pointer (with the low-bit set) into the owner thread's private undo-set is installed.  
+
+*   Stripe width tension.
+
+    In PS mode, where versioned lock words (transactional metadata) are stored
+    in a separate type-stable array, stripe width is critical parameter.
+
+    A stripe is a contiguous region of shared application that maps to given
+    lock-word.  Typical stripe widths for an STM are either 1 fullword or 
+    1 cache line.  (A stripe width that matches the cache line size -- the
+    unit of coherency -- is a good design choice.  If an application has false 
+    stripe conflicts with a stripe width of a single cache line then it is 
+    likely that the application suffers from false sharing.  If the programmer
+    takes care to avoid false cache line sharing then they'll also tend
+    to minimize false transactional conflicts).  Relatedly, most applications tend
+    to show spatial data locality so stripe width that matches the cache line
+    size is of benefit.  
+
+    If stripes are wide then an update transaction may tend to require
+    fewer expensive CAS operations at commit-time to acquire the locks covering
+    the write-set.  On the other hand narrow stripes offer better potential 
+    parallelism.  That there's a tension between stripe size and atomic latency.  
+    We want narrower (smaller) stripes in order to take advantage of potential 
+    parallelism, but we want larger stripes in order to reduce the number of CAS 
+    operations for a given sized write-set.  (In this case the concern is not CAS 
+    contention, but rather simple local CAS latency).  
+
+    Stripe width is controlled in TL2 by the PSLOCK() macro and the value of 
+    the STRIPESHIFT preprocessor definition.  
+
+
+*   In our very first TL2 implementation we incremented the global version number
+    at commit-time for each update transaction.  While correct, this incurs 
+    CAS contention (on SPARC we implement the fetch-and-add of the global version
+    number with CAS in a loop) as well as considerable cache coherency traffic.
+    Recall that all transactions must fetch the global version number variable.
+    We refer to this original form of clock management as "GV1".
+
+    We later developed more refined clock management schemes called GV4, GV5
+    and GV6.  The source code contains conditional compilation directives that
+    allow the developer to switch between the various schemes at compile-time.
+    See the 
+
+    GV4, GV5 and GV6:
+
+    In TL2 transactions must initially read the shared global version 
+    number variable.  The read value is subsequently used during the transaction to 
+    validate that the read-set (the observed data values) is consistent.  All 
+    transactions that update shared variables must increment that global version 
+    number at commit-time.  The highly read-write nature of the global version number 
+    variable results in considerable SMP coherency traffic.  Relatedly, we can suffer 
+    contention in the loop that increments the global version number in the form of
+    failed compare-and-swap operations.  These effects can limit the scalability of TL2.   
+    
+    We describe 3 related mechanisms that address the problems described above.
+    These mechanism reduce coherency traffic and compare-and-swap contention, resulting
+    in improved transactional throughput. 
+    
+    1. "GV4"
+    
+    In the original TL2 algorithm the transactional commit operation would (a)
+    acquire locks covering the transaction's write-set, (b) atomically increment the global
+    version number yielding a WV (Write Version) value, (c) validate the transaction's
+    read-set set, and, contingent upon (c), write-back the values from the write-set to 
+    their ultimate shared locations and then release and update the locks covering the 
+    write-set by storing WV into the lock-words.  The increment (atomic fetch-and-add)
+    of the global version number was accomplished with a loop using an atomic 
+    compare-and-swap (CAS) instruction. 
+    
+    We observed, however, that we can safely replace the loop with a single 
+    CAS attempt.  Lets say we have two nearly simultaneous writers trying to atomically 
+    increment the global version number.  The CAS performed by one thread succeeds but the 
+    CAS performed by the 2nd thread fails, returning the value just installed by the 
+    1st thread.  We have determined that we can safely allow both threads to use the 
+    same WV.  The thread whose CAS fails "borrows" the newly incremented value returned 
+    by the failing CAS instruction and uses that value as its WV.  Note that we still 
+    incur CAS latency on every attempt to increment the global clock and we still 
+    generate cache-coherent read-write traffic on the clock but we have avoided CAS
+    contention and the retries inherent in the original loop.  
+    
+    Allowing 2 writers to use the same WV is safe. If the CAS used to atomically increment 
+    the global version number fails then we have 2 writers racing; one atomic increment 
+    attempt succeeded and one failed.  Because the 2 threads hold locks on their respective 
+    write-sets at the time they try to increment, we know that their write-sets do not 
+    intersect.  If the write-set of one thread intersects the read-set of the other then we 
+    know that one transaction will subsequently fail validation (either because the 
+    lock associated with the read-set entry is held by the other thread, or because the 
+    other thread already committed and released the lock covering the variable, installing 
+    the new WV).  As such we can safely allow both threads to use the same (duplicate) WV.  
+    This relaxation provides a significant performance benefit on high-order SMP systems.
+    Without loss of generality, we can extend this reasoning to more than 2 threads.  
+    
+    The critical safety invariant is that any computed WV must be > any previously 
+    read (observed) RV.  Slightly more accurately, the WV must be > any RV previously
+    observed by _any thread. 
+    
+    2. "GV5" - Avoid incrementing GCLOCK on every update
+    
+    Instead of attempting to increment the global version number, we simply compute
+    WV = GlobalVersionNumber + 1.  This greatly reduces coherency traffic (write-rate)
+    on the GlobalVersionNumber at the cost of an increased false-positive abort rate.  
+    In GV5 we only increment GlobalVersionNumber at abort-time.  
+    
+    3. "GV6" - Hybrid of GV4 and GV5
+
+    GV6 is an adaptive hybrid of GV4 and GV5.  We employ a random number generator to select
+    between GV4 and GV5.  Randomly, 1 out N commit operations, we use GV4, the other N-1 times
+    we use GV5.  In one variation on GV6 We vary N based on the recent successful commit rate 
+    (transactional throughput).  That is, GV6 programmatically varies N using feedback to try 
+    to maximize transactional throughput.  (Alternately, we can attempt to minimize the 
+    recent abort rate).  
+
+    GV5 and GV6 admit single-threaded false+ aborts.  Consider the following scenario:
+
+    1.  GCLOCK is initially 10.  
+    2.  Thread T1 calls TxStart(), which fetches GCLOCK, observing 10, 
+        and sets RV accordingly.
+    3.  T1 calls TXST().  
+    4.  At commit-time  T1 computes WV = 12 = GCLOCK + 2. 
+        Critically, T1 does *not* atomically update GLOCK to 12.  The GCLOCK value
+        remains 10.   Note that we add 2 to the GCLOCK value (10) so the least 
+        significant bit of GCLOCK, WV, RV, etc., remain 0, keeping the layout of the GCLOCK
+        value the same as the versioned write-lock words where the LSB is "locked" indicator.
+        This is strictly for convenience.  
+    5.  T1 stores WV (12) in various versioned lock words covered by the 
+        write-set.  The transaction commits successfully.
+    6.  Thread T1 then runs a 2nd txn. TxStart() fetches _GCLOCK == 10 and sets RV 
+        accordingly.  The thread the calls TXLD() to fetch a variable written in the 
+        1st txn and observes Version# == 12, which is > RV.  The thread aborts.  
+
+    This is false+ abort (or "self abort") as there is no actual interference.
+    We can recover by atomically incrementing _GCLOCK at abort-time if we find 
+    that RV == GCLOCK and that the observed stripe version number that caused the 
+    abort is > GCLOCK.  Alternately we might attempt to avoid the false+ abort by advancing
+    GCLOCK at the start of a txn when computing RV if we find that the thread's previous 
+    WV is > than the current GCLOCK value.  
+
+*   The rate at which the global version number (clock) advances is really a 
+    performance concern -- related to false+ abort rates -- rather than a 
+    correctness issue. 
+
+    Ultimately, the global version number variable -- GCLOCK -- is just an 
+    optimization to reduce to the abort rate.   Incrementing GCLOCK isn't 
+    required for correctness, but the transactional subsystem periodically bumps 
+    the value to keep the abort rate low(er).  We're balancing abort rate vs.
+    coherency traffic on the shared CLOCK value.  
+
+    Generating the WV can be thought of as producing the next "linearization number".
+
+*   Our example code uses a single global version number variable, but in
+    practice we could also use a version number variable per stripe, per 
+    logical page, or per logical aggregate data structure (e.g., an instance 
+    of skiplist or red-black tree).  Any given word that is accessed transactionally
+    must be associated with ("covered by") one and only one version number variable.
+    If a transaction reads from data locations covered by multiple clocks, then
+    when it reads from a new location -- to provide for a consistent view of 
+    data -- the transactional infrastructure must re-validate all the other 
+    previously observed version number variables.  
+
+*   If the system provides a globally coherent readable clock, such as %STICK on
+    SPARC, we can use that clock instead of the software-based GCLOCK variable.  
+    It's critical that clock accesses and memory references provide at least
+    causal consistency.   Critically, if thread T2 reads the clock, observes
+    value V1, and then stores V1 into memory, and T2 observes that store, then when
+    T2 subsequently reads the clock it should observe a value >= V1.  
+    Note that the idea clock coherency is tied into the memory model.
+
+    On some modern SPARC platforms, however, %STICK is not coherent given
+    the definition above.  Thread T2 can sometimes observe a clock value of (V1-1).  
+    Empirical evidence suggests the that maximum %STICK clock "skew" is bounded at 
+    1 tick.  (As Popper noted, Absence of evidence isn't evidence of absence).  
+    Given that %STICK is incoherent, but the maximum skew is bounded, we can
+    weaken the claim in the paragraph above to state that:
+
+      Critically, if thread T2 reads the clock, observes value V1, and then stores 
+      V1 into memory, and T2 observes that store, then when T2 subsequently reads 
+      the clock it should observe a value >= (V1-MAXCLOCKSKEW).  
+
+    We can use %STICK in TL2 by adding MAXCLOCKSEW into the computed WV value.  
+    This fix is simple and maintains the TL2 safety invariant: any computed WV 
+    must be > any previously observed or computed RV value.
+
+    %STICK ticks at a frequency of 100Mhz, which is sufficiently fast for use
+    in an STM.  Reading %STICK incurs a local latency of about 30-50 cycles. 
+    Critically, multiple concurrent %STICK readers scale ideally.  (That is,
+    having multiple %STICK readers doesn't constitute a scalability impediment).  
+    Critically, %STICK is faster and more efficient than using an explicit 
+    GCLOCK variable as we can avoid coherency traffic from updates to GCLOCK.  
+
+    Finally, note that that %STICK is not propagated inter-core on Niagara.  
+    As such, %STICK is not a usable clock source for TL2.  
+
+*   As an aside, it's interesting to think about hypothetical case 
+    where the maximum skew bound (MAXCLOCKSKEW) was high enough to be a 
+    performance concern.  Higher MAXCLOCKSKEW values can result in higher
+    false-positive abort rates and lower transactional throughput.  
+    We can augment %STICK with a software "TAdjust" variable.  TAdjust
+    is monotone increasing, but hopefully we don't have to write to it
+    (increment it) too often.  Since Adjust is read by every txn, we want to
+    avoid the coherency traffic induced by writes.
+
+    At the start of txn when computing RV we'll use something like the
+    following:
+    
+      rv = RDSTICK() + TAdjust
+      // If rv is less then either then thread's previous WV
+      // or the version# that caused the previous abort (Self->AbortV)
+      // then we advance Adjust accordingly.
+      // We want to minimize the # of writes to TAdjust to avoid
+      // coherence traffic.
+      // If we find WV > rv at TxStart()-time we can:
+      // (a) preemptively try to advance TAdjust,  [OR]
+      // (b) we can be lazy and try to run the txn, risking self-abort.
+      //     If we happen to abort we can advance TAdjust either at
+      //     abort-time, or, even more lazily, at the next TxStart|GVRead-time
+      //     when we check ABV > rv.  The lazy approaches have the advantage 
+      //     that we might entirely avoid the need to advance TAdjust.
+      if (rv < Self->WV || rv < Self->AbortV) {
+         AtomicIncrement (&TAdjust, MAX(Self->WV-rv, Self->AbortV-rv)) ;
+         rv = RDSTICK() + Adjust ;
+      }
+    
+    At commit-time we'll compute WV as RDSTICK() + TAdjust + 1 + MAXCLOCKSKEW.
+
+    The code above should work well when either (a) MAXCLOCKSKEW is "large",
+    or (b) if we happen to have a low-frequency hardware clock.  The larger
+    the MAXCLOCKSKEW value, the more often we'll potentially have to increment the
+    "TAdjust" variable.  In a sense, you can think of having a synthetic or virtual 
+    clock computed as (RDSTICK()+TAdjust) that ticks faster than RDSTICK() alone.  
+    We can accelerate the virtual clock as needed by atomically incrementing "TAdjust".
+
+    Note that there are some ordering requirements w.r.t. the LD of TAdjust and
+    the RD of the %STICK, but they're simple to enforce and - I believe -
+    the races between the writers to TAdjust and the readers are benign.
+    (The key issue is when TAdjust is written by thread T1 between the LD of
+    TAdjust and the RD of STICK by thread T2).
+    
+*   TL (TL1) will generally out-perform TL2 in circumstances where we have a high 
+    mutation rate -- a high ratio of TxSTs to TxLDs with a given transaction, 
+    and a high fraction of all transactions having at least one TxST -- 
+    and a high level of parallelism.  Relatedly, TL will out-perform TL2 when 
+    the data conflict rate is high.  
+
+    The performance difference arises from two fundamental reasons:
+    1.  TL2 admits more aborts than TL(TL1). 
+    2.  Communication overhead related to the global version clock.
+        
+    This can be seen, for instance, with a red-black tree on a 16x V890 with 
+    16 threads, a key range of 200 (yielding a small tree and a high likelyhood
+    of data conflicts) an 30% updates, %30 deletes and 40% lookups.
+    TL will outperform TL2 in this particular environment.  Relately,
+    TL2 will have a much higher abort rate than TL in this environment. 
+
+    Consider the the following scenario where Thread T1 and T2 execute
+    concurrently:
+
+    Under TL1 (original TL)
+      T1 calls TxStart()
+      T2 calls TxStart()
+      T1 executes TXST A = 5
+      T1 tries to commit
+      T1 acquires LOCK(A) -- the original version # is 100
+      T1 STs A = 5
+      T1 releases LOCK(A), incrementing the version # to 102.
+      T1 completes the transaction successfully
+      T2 executes TXLD A and observes 5 and LOCK(A) == 102
+      T2 tries to commit
+      T2 validates that LOCK(A) == 102.
+      T2 completes the transaction successfully
+
+    Under TL2
+      T1 calls TxStart() and observes a global version of 1000 (RV=1000)
+      T2 calls TxStart() and observes a global version of 1000 (RV=1000)
+      T1 executes TXST A = 5
+      T1 tries to commit
+      T1 acquires LOCK(A) the original version # is 100
+      T1 advances the global version number from 1000 to 1002
+         and computes a WV of 1002.
+      T1 STs A = 5
+      T1 releases LOCK(A), setting the LOCK(A) = 1002 (T1's WV)
+      T1 completes the transaction successfully
+      T2 executes TXLD A and observes 5 and LOCK(A) == 1002.
+         In this case 1002 is > the global version # of 1000 observed
+         in TxStart(), so T2 aborts.  
+
+    As can be seen above, given the same interleaving, TL2 will abort thread T2
+    whereas T2 will complete successfully under TL.  TL admits more outcomes
+    without abort.  
+
+    Similarly, GV4 tends to yield better performance (and a reduced abort
+    rate) than GV5 or GV6 under high mutation rates and high parallelism, 
+    but at the cost of more communication overhead related to the global
+    version clock.
+
+*   TL 1.5
+
+    TL 1.5 is hybrid of TL1 and TL2.  Just as in TL2, at commit-time threads
+    bump their global timestamp and then store that value into the write-set.  
+    The txl load operator saves the address of the versioned write lock as well 
+    as the observed version.  (TL1 does just that whereas TL2 only saves the 
+    address of the versioned write-lock).  The txl LD operator also checks the 
+    thread-local RV against the transactional variable's version#.  If that test
+    fails, where TL2 would normally abort, we resort to a heavy-weight validation 
+    by iterating over the read-set and ensuring that the version#s remain unchanged.  
+    If that test passes then update or "hoist" local RV to the observed global 
+    version number and continue the transaction.   In a sense this variant uses 
+    RV just as an optimization to avoid full read-set validation.
+
+*   For a Java implementation:
+
+    1.  AtomicLongArray might be convenient for the "LockTab" versioned lock word stripe
+        array.
+
+    2.  In the C implementation the read-set and write-set entries contain the 
+        virtual addresses of the transactional variables.   Raw virtual addresses 
+        aren't necessarily stable in a copying garbage collected environment, however.  
+        Relatedly, in PS mode we find the associated lock word in the LockTab table by 
+        hashing the virtual address of the transactional variable.  
+            
+        To avoid these problems in Java or other managed runtime environments with
+        copying collectors, we could record the read-set and write-set elements
+        as (object reference, field offset) pairs instead of virtual addresses. 
+        Instead of a field offset we could also use a Java reflection "Field" type.
+        For hashing into the lock array we could use the object's hashCode() value,
+        which is stable.  
+
+        Alternately, we might continue to use raw linear addresses as is done in the
+        C implementation, but simply abort all transactions that are alive at the
+        time of a copy operation.  
+
+*   Some additional musing are available in:
+    http://blogs.sun.com/dave/entry/hardware_assisted_transactional_read_set
+    http://blogs.sun.com/dave/entry/seqlocks_in_java
+        
+*   Idea: dynamic stripe width
+
+    The PO, PW or PS schemes with narrow stripes may suffer undue local CAS latency 
+    if many distinct write-locks must be acquired. One possible solution is add an 
+    indirection-bit to the lock-word.  When set, the lock-word contains a pointer to 
+    the actual lock.  Multiple indirection is not allowed. Objects are initialized so 
+    that the per-field lock words point to either a canonical non-indirect field lock 
+    within the same object, or to a lock that protects the entire data structure 
+    (e.g., the entire red-black tree or skip-list). Initially we have coarse-grain 
+    locking with a many:1 relationship between locks fields and actual locks, but 
+    as we encounter contention we can convert automatically to fine-grain locking 
+    by replacing the indirection pointer with a normal non-indirected lock value.  
+    For safety, only the currently lock-owner can "split" or upgrade the load from 
+    the indirected form (coarse-grained) to a per-field lock (fine-grained). 
+    The transition is unidirectional - we never try to aggregate multiple fine-grain 
+    locks to refer to a single coarse-grain lock.  The onset of contention (or more 
+    precisely, aborts caused by encountering a locked object) triggers splitting. 
+    When the contending thread eventually acquires the lock it can perform the split 
+    operation.  By automatically splitting the locks and switching to finer grained 
+    locking we minimize the number of high-latency CAS operations needed to lock 
+    low-contention fields, but maximize the potential parallelism for operations that 
+    access high-contention fields.  One can the same optimization to PS, where the 
+    1st lock in the array is a normal lock and all other locks are indirect locks, 
+    pointing to the 1st element.
+
+*   It should be relatively easy to implement static transactions under
+    an "NCAS"-style interface.  The NCAS operator would interoperate properly with
+    normal TL/TL2 transactions.  
+
+*   TL1 and TL2 implement weak atomicity with respect to "normal" (non-transactional)
+    stores and loads.  
+
+*   TL1 admits zombies transactions -- transactions that have
+    read inconsistent data and, if they were to attempt validation or to commit, would
+    fail.  Zombies can generate traps or enter infinite loops.  As such,
+    the runtime environment must provide for zombie containment.  Zombies can also
+    be avoided by validation after every transactional read, but the cost of validation
+    increases geometrically with the length of the read-set, so such an approach, while
+    correct and safe, is generally not efficient.  Furthermore, an STM can avoid zombies 
+    by using so-called "visible readers" -- read-write locks .  Unfortunately pure readers 
+    then write, which causes a significant increase in coherence traffic and a commensurate 
+    reduction in scalability.  See also: http://blogs.sun.com/dave/entry/seqlocks_in_java.  
+    TL2 uses invisible readers while efficiently avoiding zombies, obviating the need 
+    for zombie containment and allowing easy integration of the STM into C or C++, as 
+    opposed to a typical managed runtime environment (MRTE) such as a JVM or CLR where 
+    zombie containment would be relatively easy to implement.  
+
+    During the operation of a TL1 transaction we periodically validate the read-set.  
+    If the read-set is found to be invalid we abort the transaction.  We say that a 
+    transaction that is still running after having read an inconsistent view of global 
+    data is a *zombie* transaction.  Such zombies are unable to successfully commit. 
+    Periodic read-set validation avoids zombies being trapped in infinite loops.   
+    Relatedly, we use "safe" loads to avoid dereferencing invalid pointers arising 
+    from zombie execution.  (On SPARC[tm] safe loads are implemented with an alternative 
+    load operation.  Elsewhere, they can implemented in software with the assistance of 
+    trap handlers that either step over the faulting instruction or directly restart the 
+    afflicted transaction).  As mentioned previously, TL2 completely avoids the issue
+    of zombies and zombie containment, but much efficiently than by (a) complete
+    read-set (re)validation after every transactional load, or (b) by way of 
+    read-write locks (visible readers).  
+
+*   The TL2 transactional load operator will first pre-fetch the lock-word covering
+    a transactional variable, then fetch the variable itself, and then issue
+    a 2nd post-fetch of the lock-word.  Both fetches the pre- and post-fetches
+    are required for correctness.  
+
+    Lets say we removed the pre-fetch from the TL2 transactional load 
+    operator.  We'd then be exposed to problems of the following sort:
+
+    Lets say we have have shared variables A and B with the following
+    invariant:
+      
+      A == 0 || B == 0
+    
+    Initially:
+      A == 0
+      B == 0
+      LOCK:A == 20
+      LOCK:B == 30
+      CLOCK = 50
+    
+    CLOCK is our global version #.  For convenience CLOCK values are always even so the 
+    values are easily comparable to our versioned write locks, where the LSB serves as 
+    the write-lock bit.  When we increment CLOCK we advance it by 2 instead of 1.  
+    
+    Threads T1 and T2 execute concurrently:
+    Thread T1 executes atomic { if (A == 0) B = 1 ; } 
+    Thread T2 executes atomic { if (B == 0) A = 1 ; } 
+    
+    Consider the following scenario or schedule:
+    
+    T1                                        T2
+    ========                                  ==========
+    
+    Start
+      LD CLOCK (50) into Self->rv
+    TXLOAD A (0)
+      LD A (0)
+      LD LOCK:A (20)
+      Compare LOCK:A (20) <= Self->rv (50)
+      Add LOCK:A to Read-Set
+    TXSTORE B = 1 (save in write-set)
+    COMMIT
+      Acquire LOCK:A
+      Atomic increment CLOCK (50->52)
+      set WV = 52
+      Validate Read-set 
+        Compare LOCK:A (20) <= Self->rv (50)
+      (Successful validation)
+                                            START
+                                              LD CLOCK (52) into Self->rv
+                                            TXLOAD B (0)
+                                              LD B (0)
+      ST B = 1
+      ST LOCK:B = WV (52) 
+      (Unlock and increment LOCK:B)
+    
+                                              LD LOCK:B (52)
+                                              Compare LOCK:A (52) <= Self->rv (52)
+                                              Add LOCK:B to read-set
+                                            TXSTORE A = 1 (save in write-set)
+                                            COMMIT
+                                              Acquire LOCK:A
+                                              Atomic increment CLOCK (52->54)
+                                              set WV = 54
+                                              Validate read-set
+                                                Compare LOCK:B (52) <= Self->rv (52)
+                                              (Successful validation)
+                                              ST A = 1 
+                                              ST LOCK:A = WV (54)
+                                              (unlock and increment LOCK:B)
+    
+    
+    We now have A == 1 && B == 1, which violates the invariant.
+    
+    Note too, that in the TL2 algorithm we need to ensure that 3 loads can not
+    be architecturally reordered.  Conceptually, we need LD-LD memory barriers 
+    (AKA MEMBARs or fences) although in practice we usually forgo the use of 
+    explicit barriers.
+
+*   Privatization and isolation - memory lifecycle issues
+
+    When a memory region passes out of the transactional domain and is subsequently
+    accessed by normal non-transactional loads and stores there can still be latent 
+    transactional accesses pending on the region.  In part, this is because TL1 
+    and TL2 admit considerable parallelism.  Such accesses can result in undesirable 
+    outcomes.  
+
+    To motive the problem we provide a number of canonical examples.  
+
+    [Scenario-1 : commit-time window] 
+    ---------------------------------
+      A is initially non-null
+      T1: txn { if (A != null) A->Field=3; } 
+      T2: txn { tmp=A; A=null; } if (tmp != null) free (tmp)
+      T1 and T2 run in parallel and interleave as follows:
+
+      Timeline:
+      T1                       T2
+      ========                 ==========
+      
+      Start                    Start
+      TxLD tmp=A               TXLD tmp=A
+      TXST tmp->Field=3        TXST A=null
+      Commit
+        Lock A->Field
+        Validate A
+        ...   
+                               Commit
+                                 Lock A
+                                 Validate A
+                                 ST A=null
+                               Txn completes successfully
+                               // T2 has privatized the region referenced by tmp
+                               free (tmp)
+        ST A->Field=3 !!!
+
+      The ST by T1 into A->Field constitutes a use-after-free error.  
+      Crucially, T2 wrote to a location previously read by T1 after T1
+      had validated its read-set. 
+
+    [Scenario-2 : reader window with zombie execution] 
+    --------------------------------------------------
+      Example:
+        Global buf initialized non-null and buf->Field != 0.  
+        v, x, and tmp are thread-local or auto variables.  
+        Invariant: within a txn buf->Field != 0
+        T1: txn { v = 10 / buf->Field; } 
+        T2: tmp = new Buf(); tmp->Field = 18; 
+            txn { x = buf; buf = tmp; };   // Privatize region
+            operate on or free(tmp), setting tmp->Field = 0 
+
+      Timeline:
+        0.  T1 starts its txn
+        1.  T1 TXLD buf and observes some address A.
+        2.  T2 runs its transactions and updates buf.  
+        3.  T2 finishes its txn successfully.  
+        4.  T2 modifies the now private region named by address A.
+            That is, T2 uses non-transaction accesses to modify the region.
+            A->Field becomes 0.
+        5.  T1 TXLD A->Field and fetches 0
+        6.  T1 is now zombie but crucially does not abort
+        7.  T1 traps with a divide-by-zero
+
+      Even if T1 were to simply have returned buf->Field instead of using it as a 
+      divisor, it could have fetched garbage and returned garbage, violating some 
+      program invariant.  For instance, consider
+        T1: auto dso; txn { dsor = buf->Field;} ; assert dsor != 0; v = 10 / dsor; 
+      where the division is performed after the transaction body.  
+
+      Our algorithm might stop T1 from returning garbage by requiring commit-time 
+      read-set validation even for pure read-only transactions, forgoing the 
+      optional optimization where pure read-only transactions can avoid tracking 
+      read-sets and performing commit-time read-set validation.  But even in that 
+      case TL2 still admits zombie execution.  
+
+
+    [Scenario-3]
+    ------------
+      This example is derived form pages 12-13 of Tim Harris' presentation 
+      "What does atomic mean?" available at
+      http://research.microsoft.com/~tharris/slides/2007-09sep-what-does-atomic-mean.pdf 
+      which describes a very similar scenario equivalent to [Scenario-2] above:
+        
+      Global XShared=true; X=10
+      T1: txn { if (XShared) tmp = X; } 
+      T2: txn { XShared = false; }      // Privatize X
+          operate on X privately
+
+    A typical situation where privatizion issues might arise  would be a concurrent 
+    collection, such as a queue.  When a node is extracted from the queue it might 
+    circulate or pass into non-transactional code.  We say the node is _isolated 
+    from or escapes the transactional domain.  Latent transactional stores are 
+    unexpected in the non-transactional code and, unchecked, could result in corruption.   
+
+    We prevent such stores by by calling TxSterilize().  TxSterilize allows the
+    region to quiesce -- that is, all pending transactional stores are allowed
+    to complete before TxSterilize() returns.  
+
+    TL2 provides _explicit_privatization_ thru the use of the TxSterlize() primitive.
+    In the examples above if the privatizing thread to call TxSterilize() on the 
+    just-isolated region after the transaction completes before operating on or 
+    free()ing the region, the pathologies would be prevented.  Proper use of 
+    TxSterlize() suffices to avoid privatization pathologies.  Even then, 
+    explicit privatization is less than ideal as it requires the programmer to 
+    understand the global lifecycle of objects, which can be burdensome and error-prone.  
+
+    More precisely, when a memory region escapes transactional usage the programmer 
+    must arrange to call TxSterlize() before accessing the region non-transactionally.  
+    The TxSterlize() operator runnings a dummy "write" transaction on the region and 
+    waits for all pending stores to complete.  We refer to this as "quiescing" a memory 
+    region.  Given the design of TL1 and TL2, in properly written application code there 
+    can be at most one pending write transaction on a block of memory that has exited 
+    the transactional domain. 
+
+    If the application is such that the node will be immediately free()ed after 
+    it escapes, then we could perform automatic privatization in free().  
+    In addition, typical implementations of free() will be able to automatically 
+    determine the length of the region being freed.  Explicit privatization via 
+    free() is not sufficient for the general case, however.  And in particular, 
+    if legacy lock-based code is being converted to transactions care must be 
+    taken with respect to privatization.  
+
+*   Despite the concern noted above, we still believe TL2 is useful.
+    In the future it is likely that languages such as Erlang, GHC Haskell,
+    or Clojure will force programmers to explicitly designate or partition
+    data as thread-private, shared read-only or shared mutable.   In Clojure,
+    for instance, transactional variables are accessible only in transactions
+    (as enforced by the type system and the compiler).  This effectively renders
+    the privatization issue moot if mixed transactional and non-transactional 
+    accesses are proscribed. 
+
+*   Another approach is to have the transactional memory subsystem provide
+    implicit (automatic) privatization.  This relieves the programmer of the
+    additional complexity and responsibility of calling TxSterilize().  
+    Crucially, explicit privatization requires that the programmer understand
+    global object lifecycles, which may be burdensome and error-prone.
+    Implicit privatization can implemented in a variety of ways.  
+    Intel, for instance, suggests quiescing threads instead of memory.  While 
+    correct, we are concerned that such a mechanism could impose scalability 
+    limits on the STM.  Another option is to simply replace versioned write-locks 
+    with anonymous read-write locks, where the lockword consists of a readercount 
+    field followed by a lock-bit in the LSB.  Critically, readers would acquire 
+    read-locks during a transaction.  Note that this approach also avoids zombies 
+    in an efficient manner (as does TL2).  The thread holds the read-locks until 
+    the writes at commit-time are completed.  This admits less parallelism than 
+    classic TL1 and TL2, but provides implicit (automatic) privatization.  
+    Unfortunately readers blocks writers.  In addition readers write to shared 
+    metadata, which can cause write coherency traffic on classic SMP systems.  
+    This can limit parallelism as readers contend for the interconnect.  
+    To the extent possible, we beleive that readers shouldn't write to shared
+    metadata (http://blogs.sun.com/dave/entry/seqlocks_in_java).  
+
+    Interestingly, complete strong atomicity should provide implicit privatization.  
+
+*   TL2 provides automatic protection against the so-called "racy publication" problem.
+    See pages 12-13 of Tim Harris' presentation "What does 'atomic' mean?" 
+    http://research.microsoft.com/~tharris/slides/2007-09sep-what-does-atomic-mean.pdf 
+    Racy publication (sometimes called premature publication) is the dual to 
+    privatization.  
+
+*   An alternative approach for stripe lock encoding would be to have the stripe
+    lock contain a lock bit (in the LSB, typically) and a pointer to thread-specific 
+    version word.  Initially, each lock word would point to special global
+    (and immutable) version word containing 0.  To acquire a write-lock a thread would
+    simply swing the lock-word to refer to its own version word while simultaneously
+    setting the lock bit.  To release a write-lock a thread would simply clear 
+    the lock-bit, leaving the lock-word pointing to updated version# in the
+    thread's own thread-specific version word. 
+
+    The thread-specific version words would need to be immortal and type-stable.  
+    This is easily accomplished by embedding the version word within the thread 
+    structure and making the thread-structure type-stable and immortal.  
+    Each thread would be associated with one thread-specific lock-word and that
+    association would persist for the thread's lifetime.  
+
+    Quoting Butler Lampson, "All problems in computer science can be solved by [adding]
+    another layer of indirection". 
+
+*   The address sets (read-set and write-set) are maintained as virtual addresses.
+    As such virtual address aliases, that is, an N to one virtual to physical page
+    mappings, are not supported by TL2.
+
+*   It's likely that an adaptive scheme that automatically switched between 
+    encounter/commit-time locking would be best.  We could even tag individual 
+    stripes with an bit that indicates when that stripe should be locked, based on 
+    recent aborts caused by that stripe.    
+
+*   It's possible to implement inevitable or conservative transactions by using
+    the least significant bit of the global version, which is currently always 0,
+    as a global lock.  Alternatively a distinguished value could be used.  
+    Only one transaction (thread) at a time could be be conservative mode with 
+    low-order bit would serving as a mutual exclusion lock.  
+
+*   Compared to other STMs TL2 admits a higher ratio of false aborts. 
+    In generate the abort rate and abort ratio can be quite high.  
+    This is less of a concern in TL2, however, as aborts incur only
+    a local cost and have low latency.  
+
+    An aborted transaction can contribute to subsequent success by warming 
+    up TLBs and caches.  (Consider this spirit to automatic run-ahead mode, which 
+    wastes cycles in the anticipation  of some future benefit).  Furthermore, 
+    if transactions are short and the transactional infrastructure has low overhead 
+    then a transaction that's in flight might have lots of other concurrent 
+    (and potentially conflicting) transactions just slightly "behind" it in time.  
+    Some will abort, but if we can keep the arrival rate high -- in part by keeping 
+    infrastructure and abort costs very low -- then we'll likely have _some closely 
+    trailing transaction poised to succeed.  It's critical that we keep the pipeline 
+    of active txns full to allow for maximum "slipstreaming".  And of course that'd 
+    yield good throughput despite a potentially high abort rate.  We also assume
+    that the number of wasted cycles from an aborted transaction is small.
+
+    Reflecting the personal tastes of the authors, we believe in relatively
+    small short-lived transactions.  Small transactions are less vulnerable 
+    to interference (conflicts) in both space and time.  The utility of
+    very large transactions remains dubious.  Large transactions could be expected
+    to access more locations (space), run longer (time) and have a large
+    at-risk investment in possibly futile processor cycles.  
+
+    
+Dave Dice 
+
+
+
+    
+    
+
+
+
+        
+
+ 
