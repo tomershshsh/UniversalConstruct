@@ -1429,17 +1429,17 @@ public:
 		}
 	}
 
-	int ccc = 0;
-	int repeats[64] = { 0 };
-	int executions[64] = { 0 };
+	unsigned int tries = 0;
+	unsigned int successfuls = 0;
 	sval_t rb_pc_insert(const int & tid, skey_t Key, sval_t Val) {
-		int temp_repeats = 0;
+		// unsigned int temp = 0;
 		while (1)
         {
+			// temp++;
             auto guard = recmgr->getGuard(tid);
             pc_open<skey_t, sval_t>(tid, &root);
             auto insertion_res = rb_insert(tid, Key, Val);
-			temp_repeats++;
+			
             if (pc_close<skey_t, sval_t>(tid, &root))
             {
                 for (auto& d : *duplications)
@@ -1447,24 +1447,15 @@ public:
 					recmgr->retire(tid, d.first);
                 }
 
-				if (true)//insertion_res == NO_VALUE)
-				{
-					repeats[tid] += temp_repeats;
-					executions[tid]++;
-					int fret = __atomic_fetch_add(&ccc, 1, __ATOMIC_RELAXED);
-					if (fret % 10000 == 0)
-					{
-						float max = 0;
-						float temp;
-						for (int i = 0; i < 64; i++)
-						{
-							temp = (float)repeats[i] / executions[i];
-							if (max < temp)
-								max = temp;
-						}
-						std::cout << "\t\t" << max << std::endl;
-					}
-				}
+				// if (insertion_res == NO_VALUE)
+				// {
+				// 	int ttries = __atomic_fetch_add(&tries, temp, __ATOMIC_RELAXED);
+				// 	int tsucc = __atomic_fetch_add(&successfuls, 1, __ATOMIC_RELAXED);
+				// 	if (tsucc % 10000 == 1)
+				// 	{
+				// 		std::cout << ttries << "\t\t" << (float)ttries / tsucc << std::endl;
+				// 	}
+				// }
                 
                 return insertion_res;
             }

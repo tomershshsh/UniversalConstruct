@@ -1098,34 +1098,7 @@ private:
     //! Correctly free either inner or leaf node, destructs all contained key
     //! and value objects.
     void free_node(const int& tid, node* n) {
-        // if (n->is_leafnode()) {
-        //     LeafNode* ln = static_cast<LeafNode*>(n);
-        //     if (duplications->find(ln) != duplications->end())
-        //     {
-        //         auto found = duplications->at(ln);
-        //         recmgr->deallocate(tid, static_cast<LeafNode*>(found.dup));
-        //     }
-        //     else
-        //     {
-        //         recmgr->retire(tid, ln);
-        //     }
-            
-        //     stats_.leaves--;
-        // }
-        // else {
-        //     InnerNode* in = static_cast<InnerNode*>(n);
-        //     if (duplications->find(in) != duplications->end())
-        //     {
-        //         auto found = duplications->at(in);
-        //         recmgr->deallocate(tid, static_cast<InnerNode*>(found.dup));
-        //     }
-        //     else
-        //     {
-        //         recmgr->retire(tid, in);
-        //     }
-
-        //     stats_.inner_nodes--;
-        // }
+        duplications->insert({n, {nullptr, nullptr, 0}});
     }
 
     //! \}
@@ -1216,8 +1189,6 @@ public:
                 if (node_parent_map->find(orig) != node_parent_map->end())
                 {
                     auto found = node_parent_map->at(orig);
-                    // parent = found.first;
-                    // child_idx = found.second;
                     parent = found.parent;
                     child_idx = found.index;
                 }

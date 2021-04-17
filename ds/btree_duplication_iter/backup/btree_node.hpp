@@ -16,8 +16,6 @@
 #include <unordered_map>
 #include <iostream>
 
-#include <sstream>
-
 namespace tlx {
 
 // *** Debugging Macros
@@ -106,6 +104,10 @@ public:
     unsigned short slotuse;
 
 	unsigned char flags;
+	pthread_spinlock_t dup_lock;
+
+    node* updated_self;
+    node* original_self;
     
 	inline bool is_del() { return (flags & DEL_MASK) == DEL_MASK; }
 	inline void set_del() { flags |= DEL_MASK; }
@@ -121,6 +123,8 @@ public:
     unsigned short get_level() const;
 
     unsigned short get_slotuse() const;
+
+    node * get_self() const;
 
     void set_slotuse(unsigned short new_slotuse);
 };
@@ -206,6 +210,10 @@ public:
 
     Value * get_slotdata_vec();
 
+    leaf_node * get_next_leaf();
+
+    leaf_node * get_prev_leaf();
+
     //! Set the (key,data) pair in slot. Overloaded function used by
     //! bulk_load().
     void set_slot(unsigned short slot, const Value& value);
@@ -213,6 +221,10 @@ public:
     void copy_to_slotdata(Value * src_first, Value * src_last, Value * dst_last);
 
     void copy_backward_to_slotdata(Value * src_first, Value * src_last, Value * dst_last);
+
+    void set_next_leaf(leaf_node * new_next);
+
+    void set_prev_leaf(leaf_node * new_prev);
 };
 
 
@@ -224,172 +236,200 @@ public:
 	unsigned int orig_idx;
 };
 
+// class path_node_t
+// {
+// public:
+//     node * current;
+//     unsigned int height;
+//     path_node_t * parent;
+//     unsigned int index;
+//     path_node_t * children[btree_default_traits<Key, Value>::inner_slots + 1];
+// };
+
 class path_info_t
 {
 public:
-    node* child;
-    node* parent;
-    unsigned int child_idx;
+    node * self;
+    node * parent;
+    unsigned short index;
+    unsigned short height;
 };
 
-thread_local std::unordered_map<node*, node*>* duplications = nullptr;
+thread_local std::unordered_map<node*, duplication_info_t>* duplications = nullptr;
 
-thread_local std::unordered_map<node*, std::pair<node*, unsigned short>>* node_parent_map = nullptr;
+thread_local std::vector<node*>* to_delete = nullptr;
+
+thread_local std::unordered_map<node*, node*>* dup_orig_map = nullptr;
+
+thread_local std::unordered_map<node*, bool>* locked = nullptr;
+
+thread_local std::unordered_map<node*, path_info_t>* node_parent_map = nullptr;
+
+// thread_local std::unordered_map<node*, path_node_t>* path = nullptr;
+// thread_local node * left_most_dup = nullptr;
+// thread_local node * right_most_dup = nullptr;
 
 thread_local std::unordered_map<node*, bool>* allocated = nullptr;
 
 thread_local bool in_writing_function = false;
 
-thread_local bool pc_happened = false;
+thread_local bool dup_happened = false;
 
 thread_local node* orig_root;
 
 thread_local node* new_root;
 
 template <typename Key, typename Value>
-void pseudo_print_tree(node * n, int num_tabs, std::stringstream& total)
-{
-    if (!n)
-        return;
-
-    if (n->is_leafnode())
-    {
-        Leafnode * ln = static_cast<Leafnode *>(n);
-        for (int j = 0; j < num_tabs; j++)
-        {
-            total << "\t";
-        }
-        total << ln << "\n";
-        for (int i = 0; i < ln->slotuse; i++)
-        {
-            for (int j = 0; j < num_tabs + 1; j++)
-            {
-                total << "\t";
-            }
-            total << ln->slotdata[i].first << "\n";
-        }
-    }
-    else
-    {
-        Innernode * in = static_cast<Innernode *>(n);
-        for (int j = 0; j < num_tabs; j++)
-        {
-            total << "\t";
-        }
-        total << in << "\n";
-        for (int i = 0; i < in->slotuse; i++)
-        {
-            for (int j = 0; j < num_tabs; j++)
-            {
-                total << "\t";
-            }
-            total << in->slotkey[i] << "\n";
-        }
-        for (int i = 0; i <= in->slotuse; i++)
-        {
-            pseudo_print_tree<Key, Value>(in->childid[i], num_tabs + 1, total);
-        }
-    }
-}
-
-template <typename Key, typename Value>
-void print_tree(node * n, int num_tabs)
-{
-    if (!n)
-        return;
-
-    if (n->is_leafnode())
-    {
-        Leafnode * ln = static_cast<Leafnode *>(n);
-        for (int j = 0; j < num_tabs; j++)
-        {
-            std::cout << "\t";
-        }
-        std::cout << ln << std::endl;
-        for (int i = 0; i < ln->slotuse; i++)
-        {
-            for (int j = 0; j < num_tabs + 1; j++)
-            {
-                std::cout << "\t";
-            }
-            std::cout << ln->slotdata[i].first << std::endl;
-        }
-    }
-    else
-    {
-        Innernode * in = static_cast<Innernode *>(n);
-        for (int j = 0; j < num_tabs; j++)
-        {
-            std::cout << "\t";
-        }
-        std::cout << in << std::endl;
-        for (int i = 0; i < in->slotuse; i++)
-        {
-            for (int j = 0; j < num_tabs; j++)
-            {
-                std::cout << "\t";
-            }
-            std::cout << in->slotkey[i] << std::endl;
-        }
-        for (int i = 0; i <= in->slotuse; i++)
-        {
-            if (in->childid[i] == 0 || in == in->childid[i])
-            {
-                std::cout << "error " << in << "->childid[" << i << "] == " << in->childid[i] << std::endl;
-            }
-            else
-            {
-                print_tree<Key, Value>(in->childid[i], num_tabs + 1);
-            }
-        }
-    }
-}
-
-template <typename Key, typename Value>
-bool pc_open(node** root)
+bool dup_open(int tid, node** root)
 {
 	if (duplications)
 		duplications->clear();
 	else
-		duplications = new std::unordered_map<node*, node*>();
+		duplications = new std::unordered_map<node*, duplication_info_t>();
+
+    if (to_delete)
+        to_delete->clear();
+    else
+        to_delete = new std::vector<node*>();
+
+    if (dup_orig_map)
+		dup_orig_map->clear();
+	else
+		dup_orig_map = new std::unordered_map<node*, node*>();
+
+    if (locked)
+		locked->clear();
+	else
+        locked = new std::unordered_map<node*, bool>();
 
     if (node_parent_map)
 		node_parent_map->clear();
 	else
-		node_parent_map = new std::unordered_map<node*, std::pair<node*, unsigned short>>();
+		// node_parent_map = new std::unordered_map<node*, std::pair<node*, unsigned short>>();
+        node_parent_map = new std::unordered_map<node*, path_info_t>();
 
     if (allocated)
         allocated->clear();
     else
         allocated = new std::unordered_map<node*, bool>();
 
-	// orig_root = *root;
-    __atomic_load(root, &orig_root, __ATOMIC_RELAXED);
-	new_root = orig_root;
+    // if (path)
+    //     path->clear();
+    // else
+    //     path = new std::unordered_map<node*, path_info_t>();
+    // left_most_dup = nullptr;
+    // right_most_dup = nullptr;
+
+	orig_root = *root;
+	new_root = *root;
 	in_writing_function = true;
-	pc_happened = false;
+	dup_happened = false;
+
+    if (orig_root)
+        node_parent_map->insert({ orig_root, { orig_root, nullptr, 0, 0 }});
+
 	return true;
 }
 
 template <typename Key, typename Value>
-bool pc_close(node** root)
+void dup_unlock_duplications(int tid, bool all)
 {
-	in_writing_function = false;
+	for (auto& l : *locked)
+	{
+		if (all || l.second)
+        {
+            locked->erase(l.first);
+			pthread_spin_unlock(&l.first->dup_lock);
+        }
+	}
+}
 
-	if (pc_happened)
+bool dup_lock_duplications()
+{
+	return true;
+}
+
+template <typename Key, typename Value>
+bool dup_close(int tid, node** root)
+{
+    bool result = true;
+
+	in_writing_function = false;
+	if (!dup_happened)
+    {
+        result = true;
+        goto end;
+    }
+
+	if (!dup_lock_duplications())
+    {
+        result = false;
+        goto end;
+    }
+    
+    /* check that parent-child relations are as expected */
+	for (auto& d: *duplications)
 	{
-		return __atomic_compare_exchange_n(
-            root, 
-            &orig_root, 
-            new_root, 
-            true, 
-            __ATOMIC_RELAXED, 
-            __ATOMIC_RELAXED);
+		auto orig = d.first;
+        auto dup = d.second.dup;
+		auto orig_parent = static_cast<Innernode*>(d.second.orig_parent);
+		auto orig_idx = d.second.orig_idx;
+
+        if (duplications->find(orig_parent) != duplications->end() ||
+            allocated->find(orig_parent) != allocated->end())
+        {
+            continue;
+        }
+        
+		if (orig_parent != nullptr && orig_parent->childid[orig_idx] != orig) 
+        {
+			dup_unlock_duplications<Key, Value>(tid, true);
+            result = false;
+            goto end;
+		}
 	}
-	else
+
+	for (auto& d : *duplications)
 	{
-		return true;
+		auto orig = d.first;
+		auto dup = d.second.dup;
+		auto orig_parent = static_cast<Innernode*>(d.second.orig_parent);
+		auto orig_idx = d.second.orig_idx;
+
+        orig->updated_self = dup;
+        orig->original_self->updated_self = dup;
+
+        if (duplications->find(orig_parent) != duplications->end() ||
+            allocated->find(orig_parent) != allocated->end())
+        {
+            continue;
+        }
+
+		if (orig_parent != nullptr)
+		{
+            orig_parent->childid[orig_idx] = dup;
+		}
+		else
+		{
+            orig_root = new_root;
+            *root = new_root;
+		}
 	}
+
+    if (orig_root != new_root)
+	{
+		if (!__atomic_compare_exchange_n(root, &orig_root, new_root, true, __ATOMIC_RELAXED, __ATOMIC_RELAXED))
+		{
+			dup_unlock_duplications<Key, Value>(tid, true);
+			result = false;
+			goto end;
+		}
+	}
+
+	dup_unlock_duplications<Key, Value>(tid, false);
+
+end:
+	return result;
 }
 
 node::node()
@@ -401,6 +441,8 @@ void node::initialize(const unsigned short l) {
     level = l;
     slotuse = 0;
     flags = 0;
+    updated_self = this;
+    pthread_spin_init(&dup_lock, PTHREAD_PROCESS_PRIVATE);
 }
 
 bool node::is_leafnode() const {
@@ -408,7 +450,7 @@ bool node::is_leafnode() const {
     if (in_writing_function && duplications->find(orig) != duplications->end())
     {
         auto found = duplications->at(orig);
-        return (found->level == 0);
+        return (found.dup->level == 0);
     }
 
     return (level == 0);
@@ -420,7 +462,7 @@ unsigned short node::get_level() const
     if (in_writing_function && duplications->find(orig) != duplications->end())
     {
         auto found = duplications->at(orig);
-        return found->level;
+        return found.dup->level;
     }
     
     return level;
@@ -432,7 +474,7 @@ unsigned short node::get_slotuse() const
     if (in_writing_function && duplications->find(orig) != duplications->end())
     {
         auto found = duplications->at(orig);
-        return found->slotuse;
+        return found.dup->slotuse;
     }
 
     return slotuse;
@@ -440,6 +482,19 @@ unsigned short node::get_slotuse() const
 
 void node::set_slotuse(unsigned short new_slotuse) {
     slotuse = new_slotuse;
+}
+
+node * node::get_self() const
+{
+    node * self = (node *)this;
+    if (in_writing_function)
+    {
+		if (self != nullptr && duplications->find(self) != duplications->end()) {
+			self = duplications->at(self).dup;
+		}
+    }
+
+	return self;
 }
 
 
@@ -455,7 +510,7 @@ const Key& Innernode::key(size_t s) const {
     if (in_writing_function && duplications->find(orig) != duplications->end())
     {
         auto found = duplications->at(orig);
-        return ((Innernode*)found)->slotkey[s];
+        return ((Innernode*)found.dup)->slotkey[s];
     }
 
     return slotkey[s];
@@ -467,7 +522,7 @@ bool Innernode::is_full() const {
     if (in_writing_function && duplications->find(orig) != duplications->end())
     {
         auto found = duplications->at(orig);
-        return (found->slotuse == btree_default_traits<Key, Value>::inner_slots);
+        return (found.dup->slotuse == btree_default_traits<Key, Value>::inner_slots);
     }
 
     return (node::slotuse == btree_default_traits<Key, Value>::inner_slots);
@@ -479,7 +534,7 @@ bool Innernode::is_few() const {
     if (in_writing_function && duplications->find(orig) != duplications->end())
     {
         auto found = duplications->at(orig);
-        return (found->slotuse <= btree_default_traits<Key, Value>::inner_slots / 2);
+        return (found.dup->slotuse <= btree_default_traits<Key, Value>::inner_slots / 2);
     }
 
     return (node::slotuse <= btree_default_traits<Key, Value>::inner_slots / 2);
@@ -491,7 +546,7 @@ bool Innernode::is_underflow() const {
     if (in_writing_function && duplications->find(orig) != duplications->end())
     {
         auto found = duplications->at(orig);
-        return (found->slotuse < btree_default_traits<Key, Value>::inner_slots / 2);
+        return (found.dup->slotuse < btree_default_traits<Key, Value>::inner_slots / 2);
     }
 
     return (node::slotuse < btree_default_traits<Key, Value>::inner_slots / 2);
@@ -503,25 +558,48 @@ node * Innernode::get_child(unsigned short slot) const
     node* child = childid[slot];
     if (in_writing_function)
     {
-        node * orig = (node*)this;
-        if (duplications->find(orig) != duplications->end())
+        node * parent = (node*)this;
+    
+        if (duplications->find(parent) != duplications->end())
         {
-            node* dup = (duplications->at(orig));
-            child = ((Innernode*)dup)->childid[slot];
-            node_parent_map->insert(
-                std::make_pair<node*, std::pair<node*, unsigned short>>(
-                    (node*)child, std::make_pair<node*, unsigned short>(
-                        (node*)dup, (unsigned short)slot)));
+            node * dup = (duplications->at(parent)).dup;
+            parent = dup;
+            child = ((Innernode*)parent)->childid[slot];
         }
-        else
+    
+        if (child != NULL && allocated->find(child) == allocated->end() && allocated->find(parent) == allocated->end())
         {
-            node_parent_map->insert(
-                std::make_pair<node*, std::pair<node*, unsigned short>>(
-                    (node*)child, std::make_pair<node*, unsigned short>(
-                        (node*)this, (unsigned short)slot)));
+            if (node_parent_map->find(child) == node_parent_map->end())
+            {
+                unsigned short parent_height = 0;
+				if (node_parent_map->find(parent) != node_parent_map->end())
+					parent_height = node_parent_map->at(parent).height;
+    
+                node_parent_map->insert({
+						child, { child, parent, (unsigned short)slot, (unsigned short)(parent_height + 1) }});
+            }
+        }
+        else if (child != NULL)
+        {
+            auto ochild = child;
+			if (dup_orig_map->find(child) != dup_orig_map->end())
+				ochild = dup_orig_map->at(child);
+    
+            auto oparent = parent;
+			if (dup_orig_map->find(parent) != dup_orig_map->end())
+				oparent = dup_orig_map->at(parent);
+    
+            unsigned short oparent_height = 0;
+			if (node_parent_map->find(oparent) != node_parent_map->end())
+            	oparent_height = node_parent_map->at(oparent).height;
+    
+            if (((Innernode*)oparent)->childid[slot] == ochild) {
+				node_parent_map->insert({
+						ochild, { ochild, oparent, (unsigned short)slot, (unsigned short)(oparent_height + 1) }});
+			}
         }
     }
-
+    
     return child;
 }
 
@@ -532,7 +610,7 @@ node ** Innernode::get_childid_vec()
     if (in_writing_function && duplications->find(orig) != duplications->end())
     {
         auto found = duplications->at(orig);
-        return ((Innernode*)found)->childid;
+        return ((Innernode*)found.dup)->childid;
     }
 
     return childid;
@@ -561,7 +639,7 @@ Key Innernode::get_slotkey(unsigned short slot) const
     if (in_writing_function && duplications->find(orig) != duplications->end())
     {
         auto found = duplications->at(orig);
-        return ((Innernode*)found)->slotkey[slot];
+        return ((Innernode*)found.dup)->slotkey[slot];
     }
 
     return slotkey[slot];
@@ -574,7 +652,7 @@ Key * Innernode::get_slotkey_vec()
     if (in_writing_function && duplications->find(orig) != duplications->end())
     {
         auto found = duplications->at(orig);
-        return &((Innernode*)found)->slotkey[0];
+        return &((Innernode*)found.dup)->slotkey[0];
     }
 
     return &slotkey[0];
@@ -609,7 +687,7 @@ const Key& Leafnode::key(size_t s) const {
     if (in_writing_function && duplications->find(orig) != duplications->end())
     {
         auto found = duplications->at(orig);
-        return ((Leafnode*)found)->slotdata[s].first;
+        return ((Leafnode*)found.dup)->slotdata[s].first;
     }
 
     return slotdata[s].first;
@@ -621,7 +699,7 @@ bool Leafnode::is_full() const {
     if (in_writing_function && duplications->find(orig) != duplications->end())
     {
         auto found = duplications->at(orig);
-        return (found->slotuse == btree_default_traits<Key, Value>::leaf_slots);
+        return (found.dup->slotuse == btree_default_traits<Key, Value>::leaf_slots);
     }
 
     return (node::slotuse == btree_default_traits<Key, Value>::leaf_slots);
@@ -633,7 +711,7 @@ bool Leafnode::is_few() const {
     if (in_writing_function && duplications->find(orig) != duplications->end())
     {
         auto found = duplications->at(orig);
-        return (found->slotuse <= btree_default_traits<Key, Value>::leaf_slots / 2);
+        return (found.dup->slotuse <= btree_default_traits<Key, Value>::leaf_slots / 2);
     }
 
     return (node::slotuse <= btree_default_traits<Key, Value>::leaf_slots / 2);
@@ -645,7 +723,7 @@ bool Leafnode::is_underflow() const {
     if (in_writing_function && duplications->find(orig) != duplications->end())
     {
         auto found = duplications->at(orig);
-        return (found->slotuse < btree_default_traits<Key, Value>::leaf_slots / 2);
+        return (found.dup->slotuse < btree_default_traits<Key, Value>::leaf_slots / 2);
     }
 
     return (node::slotuse < btree_default_traits<Key, Value>::leaf_slots / 2);
@@ -658,7 +736,7 @@ Value Leafnode::get_slot(unsigned short slot) const
     if (in_writing_function && duplications->find(orig) != duplications->end())
     {
         auto found = duplications->at(orig);
-        return ((Leafnode*)found)->slotdata[slot];
+        return ((Leafnode*)found.dup)->slotdata[slot];
     }
 
     return slotdata[slot];
@@ -671,7 +749,7 @@ Value& Leafnode::get_slot(unsigned short slot)
     if (in_writing_function && duplications->find(orig) != duplications->end())
     {
         auto found = duplications->at(orig);
-        return ((Leafnode*)found)->slotdata[slot];
+        return ((Leafnode*)found.dup)->slotdata[slot];
     }
 
     return slotdata[slot];
@@ -684,10 +762,36 @@ Value * Leafnode::get_slotdata_vec()
     if (in_writing_function && duplications->find(orig) != duplications->end())
     {
         auto found = duplications->at(orig);
-        return &((Leafnode*)found)->slotdata[0];
+        return &((Leafnode*)found.dup)->slotdata[0];
     }
 
     return &slotdata[0];
+}
+
+template <typename Key, typename Value>
+Leafnode * Leafnode::get_next_leaf()
+{
+    node * current = (node*)this;
+    if (in_writing_function && duplications->find(current) != duplications->end())
+    {
+        auto found = duplications->at(current);
+        return ((Leafnode*)found.dup)->next_leaf;
+    }
+
+    return next_leaf;
+}
+
+template <typename Key, typename Value>
+Leafnode * Leafnode::get_prev_leaf()
+{
+    node * orig = (node*)this;
+    if (in_writing_function && duplications->find(orig) != duplications->end())
+    {
+        auto found = duplications->at(orig);
+        return ((Leafnode*)found.dup)->prev_leaf;
+    }
+
+    return prev_leaf;
 }
 
 template <typename Key, typename Value>
@@ -704,6 +808,18 @@ void Leafnode::copy_to_slotdata(Value * src_first, Value * src_last, Value * dst
 template <typename Key, typename Value>
 void Leafnode::copy_backward_to_slotdata(Value * src_first, Value * src_last, Value * dst_last) {
     std::copy_backward(src_first, src_last, dst_last);
+}
+
+template <typename Key, typename Value>
+void Leafnode::set_next_leaf(Leafnode * new_next)
+{
+    next_leaf = new_next;
+}
+
+template <typename Key, typename Value>
+void Leafnode::set_prev_leaf(Leafnode * new_prev)
+{
+    prev_leaf = new_prev;
 }
 
 } // namespace tlx

@@ -257,6 +257,15 @@ public:
                         tree_.recmgr->retire(tid, static_cast<tlx::inner_node<key_type, value_type>*>(d.first));
                     }
                 }
+                for (auto& f : *tlx::to_delete)
+                {
+                    if (f->is_leafnode()) {
+                        tree_.recmgr->retire(tid, static_cast<tlx::leaf_node<key_type, value_type>*>(f));
+                    }
+                    else {
+                        tree_.recmgr->retire(tid, static_cast<tlx::inner_node<key_type, value_type>*>(f));
+                    }
+                }
                 
                 if (insertion_res.second)
                     return NO_VALUE;
@@ -265,8 +274,6 @@ public:
             }
             else
             {
-                if (tid == 0)
-                    std::cout << key << " " << tlx::locking_res << std::endl;
                 for (auto& d : *tlx::allocated)
                 {
                     if (d.first->is_leafnode()) {
@@ -293,12 +300,12 @@ public:
         while (1)
         {
             auto guard = tree_.recmgr->getGuard(tid);
-            tlx::dup_open<key_type, value_type>(tid, &tree_.root_);
+            tlx::dup_open<key_type, value_type>(tid, &tree_.root_, &tree_.head_leaf_, &tree_.tail_leaf_);
             tlx::locking_res = true;
             auto removal_res = tree_.erase_one(tid, key);
             tree_.dup_paths_to_lca(tid);
 
-            if (tlx::locking_res && tlx::dup_close<key_type, value_type>(tid, &tree_.root_))
+            if (tlx::locking_res && tlx::dup_close<key_type, value_type>(tid, &tree_.root_, &tree_.head_leaf_, &tree_.tail_leaf_))
             {
                 for (auto& d : *tlx::duplications)
                 {
@@ -307,6 +314,15 @@ public:
                     }
                     else {
                         tree_.recmgr->retire(tid, static_cast<tlx::inner_node<key_type, value_type>*>(d.first));
+                    }
+                }
+                for (auto& f : *tlx::to_delete)
+                {
+                    if (f->is_leafnode()) {
+                        tree_.recmgr->retire(tid, static_cast<tlx::leaf_node<key_type, value_type>*>(f));
+                    }
+                    else {
+                        tree_.recmgr->retire(tid, static_cast<tlx::inner_node<key_type, value_type>*>(f));
                     }
                 }
 

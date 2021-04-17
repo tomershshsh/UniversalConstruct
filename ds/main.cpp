@@ -18,7 +18,7 @@ typedef long long test_type;
 #include <parallel/algorithm>
 #include <omp.h>
 #include <perftools.h>
-#include <vector>
+#include <fstream>
 
 #ifdef PRINT_JEMALLOC_STATS
     #include <jemalloc/jemalloc.h>
@@ -188,6 +188,8 @@ struct globals_t {
     {
         keygenZipfData = NULL;
         srand(time(0));
+        // auto rrr = rand();
+        // std::cout << rrr << std::endl;
         for (int i=0;i<MAX_THREADS_POW2;++i) {
             rngs[i].setSeed(rand());
         }
@@ -266,6 +268,7 @@ void thread_prefill_with_updates(GlobalsT * g, int __tid) {
             if (g->dsAdapter->INSERT_FUNC(tid, key, KEY_TO_VALUE(key)) == g->dsAdapter->getNoValue()) {
                 GSTATS_ADD(tid, key_checksum, key);
                 GSTATS_ADD(tid, prefill_size, 1);
+                // GSTATS_ADD(tid, num_inserts, 1);
             }
             GSTATS_ADD(tid, num_inserts, 1);
         } else {
@@ -316,7 +319,7 @@ void prefillWithInserts(auto g, int64_t expectedSize) {
         
         #pragma omp for schedule(dynamic, 100000)
         for (size_t i=0;i<expectedSize;++i) {
-            g->keygens[tid]->next();
+            test_type key = g->keygens[tid]->next();
             //test_type key = g->rngs[tid].next(MAXKEY) + 1;
             GSTATS_ADD(tid, num_inserts, 1);
             if (g->dsAdapter->INSERT_FUNC(tid, key, KEY_TO_VALUE(key)) == g->dsAdapter->getNoValue()) {
@@ -517,7 +520,7 @@ void createAndPrefillDataStructure(auto g, int64_t expectedSize) {
     }
     
     if (expectedSize == -1) {
-        const double expectedFullness = (INS+DEL ? INS / (double)(INS+DEL) : 0.5); // percent full in expectation
+        const double expectedFullness = 0.5;//(INS+DEL ? INS / (double)(INS+DEL) : 0.5); // percent full in expectation
         expectedSize = (int64_t) (MAXKEY * expectedFullness);
     }
     
@@ -594,6 +597,7 @@ void thread_timed(GlobalsT * g, int __tid) {
             if (g->dsAdapter->INSERT_FUNC(tid, key, KEY_TO_VALUE(key)) == g->dsAdapter->getNoValue()) {
                 GSTATS_ADD(tid, key_checksum, key);
                 GSTATS_ADD(tid, size_checksum, 1);
+                // GSTATS_ADD(tid, num_inserts, 1);
             }
             GSTATS_TIMER_APPEND_ELAPSED(tid, timer_latency, latency_updates);
             GSTATS_ADD(tid, num_inserts, 1);
@@ -786,7 +790,7 @@ void trial(GlobalsT * g) {
     COUTATOMIC("###############################################################################"<<std::endl);
     COUTATOMIC(std::endl);
 
-    const long MAX_NAPPING_MILLIS = (MAXKEY > 5e7 ? 120000 : 30000);
+    const long MAX_NAPPING_MILLIS = (MAXKEY > 5e7 ? 120000 : 5000);
     g->elapsedMillis = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::high_resolution_clock::now() - g->startTime).count();
     g->elapsedMillisNapping = 0;
     while (g->running > 0 && g->elapsedMillisNapping < MAX_NAPPING_MILLIS) {
@@ -961,6 +965,11 @@ void printOutput(auto g) {
         COUTATOMIC("query throughput              : "<<throughputQueries<<std::endl);
         COUTATOMIC("total throughput              : "<<throughputAll<<std::endl);
         COUTATOMIC(std::endl);
+
+	std::ofstream myfile;
+	myfile.open("/specific/a/home/cc/students/cs/tomershanny/Master/Code/UniversalConstruct/microbench/results", std::ios::out | std::ios::app);
+	myfile << throughputAll << "\n";
+	myfile.close();
     }
 #endif
     

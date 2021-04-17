@@ -1681,11 +1681,7 @@ public:
 		}
 	}
 
-	int ccc = 0;
-	int repeats[64] = { 0 };
-	int executions[64] = { 0 };
 	sval_t rb_dup_insert(const int & tid, skey_t Key, sval_t Val) {
-		int temp_repeats = 0;
 		while (1)
         {
             auto guard = recmgr->getGuard(tid);
@@ -1693,7 +1689,6 @@ public:
             locking_res = true;
             auto insertion_res = rb_insert(tid, Key, Val);
             dup_paths_to_lca(tid);
-			temp_repeats++;
 
             if (locking_res && dup_close<skey_t, sval_t>(tid, &root))
             {
@@ -1701,25 +1696,6 @@ public:
                 {
 					recmgr->retire(tid, d.first);
                 }
-
-				if (true)//insertion_res == NO_VALUE)
-				{	
-					repeats[tid] += temp_repeats;
-					executions[tid]++;
-					int fret = __atomic_fetch_add(&ccc, 1, __ATOMIC_RELAXED);
-					if (fret % 10000 == 0)
-					{
-						float max = 0;
-						float temp;
-						for (int i = 0; i < 64; i++)
-						{
-							temp = (float)repeats[i] / executions[i];
-							if (max < temp)
-								max = temp;
-						}
-						std::cout << "\t\t" << max << std::endl;
-					}
-				}
                 
                 return insertion_res;
             }

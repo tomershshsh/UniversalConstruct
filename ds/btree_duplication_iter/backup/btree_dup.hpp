@@ -238,8 +238,12 @@ public:
     //! already present.
     sval_t insert(const int tid, const skey_t& key, const sval_t& value) 
     {
+        int i = 0;
         while (1)
         {
+            i++;
+            if (i % 100000 == tid * 10000)
+                std::cout << tid <<": bla " << tlx::locking_res << std::endl;
             auto guard = tree_.recmgr->getGuard(tid);
             tlx::dup_open<key_type, value_type>(tid, &tree_.root_);
             tlx::locking_res = true;
@@ -257,6 +261,15 @@ public:
                         tree_.recmgr->retire(tid, static_cast<tlx::inner_node<key_type, value_type>*>(d.first));
                     }
                 }
+                for (auto& f : *tlx::to_delete)
+                {
+                    if (f->is_leafnode()) {
+                        tree_.recmgr->retire(tid, static_cast<tlx::leaf_node<key_type, value_type>*>(f));
+                    }
+                    else {
+                        tree_.recmgr->retire(tid, static_cast<tlx::inner_node<key_type, value_type>*>(f));
+                    }
+                }
                 
                 if (insertion_res.second)
                     return NO_VALUE;
@@ -265,8 +278,6 @@ public:
             }
             else
             {
-                if (tid == 0)
-                    std::cout << key << " " << tlx::locking_res << std::endl;
                 for (auto& d : *tlx::allocated)
                 {
                     if (d.first->is_leafnode()) {
@@ -290,8 +301,12 @@ public:
     //! unique-associative map there is no difference to erase().
     sval_t erase(const int tid, const skey_t& key) 
     {
+        int i = 0;
         while (1)
         {
+            i++;
+            if (i % 100000 == tid * 10000)
+                std::cout << tid <<": bla " << tlx::locking_res << std::endl;
             auto guard = tree_.recmgr->getGuard(tid);
             tlx::dup_open<key_type, value_type>(tid, &tree_.root_);
             tlx::locking_res = true;
@@ -307,6 +322,15 @@ public:
                     }
                     else {
                         tree_.recmgr->retire(tid, static_cast<tlx::inner_node<key_type, value_type>*>(d.first));
+                    }
+                }
+                for (auto& f : *tlx::to_delete)
+                {
+                    if (f->is_leafnode()) {
+                        tree_.recmgr->retire(tid, static_cast<tlx::leaf_node<key_type, value_type>*>(f));
+                    }
+                    else {
+                        tree_.recmgr->retire(tid, static_cast<tlx::inner_node<key_type, value_type>*>(f));
                     }
                 }
 
